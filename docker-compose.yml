@@ -1,0 +1,29 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    container_name: ai-tech-bot
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    # Uncomment if switching to webhook mode behind a reverse proxy
+    # ports:
+    #   - "8080:8080"
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "print('ok')"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 5
+
+  # postgres:
+  #   image: postgres:16-alpine
+  #   restart: always
+  #   environment:
+  #     POSTGRES_DB: botdb
+  #     POSTGRES_USER: bot
+  #     POSTGRES_PASSWORD: change_me
+  #   volumes:
+  #     - ./pgdata:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
