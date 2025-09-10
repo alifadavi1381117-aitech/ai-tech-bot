@@ -1,149 +1,84 @@
-from __future__ import annotations
-import asyncio
 import os
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.exceptions import TelegramBadRequest
-from dotenv import load_dotenv
-import pytz
-
+import asyncio
+import aiohttp
+from aiohttp import web
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from feeds import FEEDS_GENERAL, FEEDS_AI, FEEDS_IOT_ROBOTICS, fetch_rss, format_items
-from snippets import pick_code, code_to_text
-
-# -------- Config --------
-load_dotenv()
+# گرفتن توکن از Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TZ = os.getenv("TZ", "Europe/Berlin")
+
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not found. Put it in .env")
+    raise ValueError("❌ BOT_TOKEN is not set in environment variables.")
 
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+# تنظیم Bot و Dispatcher
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
-rt = Router()
-dp.include_router(rt)
 
-# Ensure timezone exists (no-op if invalid)
-try:
-    pytz.timezone(TZ)
-except Exception:
-    TZ = "UTC"
+# ================== وب‌سرور برای Render ==================
+async def start_http_server():
+    app = web.Application()
 
-# -------- UI --------
-def main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📰 اخبار تکنولوژی", callback_data="news"),
-            InlineKeyboardButton(text="🤖 اخبار هوش مصنوعی", callback_data="ai_news"),
-        ],
-        [
-            InlineKeyboardButton(text="🛰️ IoT/رباتیک", callback_data="iot_news"),
-            InlineKeyboardButton(text="💻 کدهای کاربردی", callback_data="code"),
-        ],
-    ])
+    async def ok(_):
+        return web.Response(text="OK")
 
-# -------- Handlers --------
-@rt.message(CommandStart())
-async def start(msg: Message):
-    await msg.answer(
-        "سلام! 👋 من ربات خبرهای داغ تکنولوژی/هوش‌مصنوعی و کدهای کاربردی پایتون/رباتیک/IoT هستم.\n"
-        "از دکمه‌های زیر استفاده کن یا دستورات /help /news /ai_news /iot_news /code رو بزن.",
-        reply_markup=main_kb()
+    app.router.add_get("/", ok)
+    port = int(os.getenv("PORT", "8000"))  # Render متغیر PORT رو ست می‌کنه
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    print(f"✅ HTTP server is listening on 0.0.0.0:{port}")
+
+# ================== هندلرها ==================
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📰 News", callback_data="news")],
+            [InlineKeyboardButton(text="🤖 AI News", callback_data="ai_news")],
+            [InlineKeyboardButton(text="🔧 Python Code", callback_data="code")],
+            [InlineKeyboardButton(text="📡 IoT", callback_data="iot_news")]
+        ]
     )
+    await message.answer("سلام 👋\nمن ربات اخبار تکنولوژی و کدهای جذاب هستم.", reply_markup=keyboard)
 
-@rt.message(Command("help"))
-async def help_cmd(msg: Message):
-    await msg.answer(
-        "دستورات موجود:\n"
-        "/news — آخرین خبرهای تکنولوژی\n"
-        "/ai_news — تازه‌های هوش مصنوعی\n"
-        "/iot_news — خبرهای IoT/رباتیک\n"
-        "/code — یک اسنیپت کد کاربردی (مثلاً: /code python یا /code iot)\n"
-        "می‌تونی از دکمه‌ها هم استفاده کنی 👇",
-        reply_markup=main_kb()
-    )
+@dp.callback_query(lambda cq: cq.data == "news")
+async def cb_news(cq: types.CallbackQuery):
+    await cq.message.answer("📰 آخرین اخبار تکنولوژی...")
+    await cq.answer()
 
-@rt.message(Command("news"))
-async def news_cmd(msg: Message):
-    items = fetch_rss(FEEDS_GENERAL, limit=8)
-    await msg.answer(format_items(items, "خبرهای تکنولوژی"))
+@dp.callback_query(lambda cq: cq.data == "ai_news")
+async def cb_ai_news(cq: types.CallbackQuery):
+    await cq.message.answer("🤖 آخرین اخبار هوش مصنوعی...")
+    await cq.answer()
 
-@rt.message(Command("ai_news"))
-async def ai_news_cmd(msg: Message):
-    items = fetch_rss(FEEDS_AI, limit=8)
-    await msg.answer(format_items(items, "تازه‌های هوش مصنوعی"))
+@dp.callback_query(lambda cq: cq.data == "code")
+async def cb_code(cq: types.CallbackQuery):
+    await cq.message.answer("🔧 یک کد جذاب پایتون:")
+    await cq.message.answer("```python\nprint('Hello AI Bot!')\n```")
+    await cq.answer()
 
-@rt.message(Command("iot_news"))
-async def iot_news_cmd(msg: Message):
-    items = fetch_rss(FEEDS_IOT_ROBOTICS, limit=8)
-    await msg.answer(format_items(items, "IoT و رباتیک"))
+@dp.callback_query(lambda cq: cq.data == "iot_news")
+async def cb_iot(cq: types.CallbackQuery):
+    await cq.message.answer("📡 اخبار اینترنت اشیاء...")
+    await cq.answer()
 
-@rt.message(Command("code"))
-async def code_cmd(msg: Message):
-    parts = (msg.text or "").split()
-    tag = parts[1].lower() if len(parts) > 1 else None
-    sn = pick_code(tag)
-    if not sn:
-        await msg.answer("برای این تگ کدی ندارم. تگ‌های موجود: python, perf, async, network, robotics, sensors, iot, mqtt")
-        return
-    await msg.answer(code_to_text(sn))
-
-# -------- Callback handlers (ACK fast; tolerate stale queries) --------
-@rt.callback_query(F.data == "news")
-async def cb_news(cq):
-    try:
-        await cq.answer()  # ACK فوری
-    except TelegramBadRequest:
-        return  # کوئری قدیمی: رها کن
-    items = fetch_rss(FEEDS_GENERAL, limit=8)
-    try:
-        await cq.message.edit_text(format_items(items, "خبرهای تکنولوژی"), reply_markup=main_kb())
-    except TelegramBadRequest:
-        pass
-
-@rt.callback_query(F.data == "ai_news")
-async def cb_ai(cq):
-    try:
-        await cq.answer()
-    except TelegramBadRequest:
-        return
-    items = fetch_rss(FEEDS_AI, limit=8)
-    try:
-        await cq.message.edit_text(format_items(items, "تازه‌های هوش مصنوعی"), reply_markup=main_kb())
-    except TelegramBadRequest:
-        pass
-
-@rt.callback_query(F.data == "iot_news")
-async def cb_iot(cq):
-    try:
-        await cq.answer()
-    except TelegramBadRequest:
-        return
-    items = fetch_rss(FEEDS_IOT_ROBOTICS, limit=8)
-    try:
-        await cq.message.edit_text(format_items(items, "IoT و رباتیک"), reply_markup=main_kb())
-    except TelegramBadRequest:
-        pass
-
-@rt.callback_query(F.data == "code")
-async def cb_code(cq):
-    try:
-        await cq.answer()
-    except TelegramBadRequest:
-        return
-    sn = pick_code(None)
-    try:
-        await cq.message.edit_text(code_to_text(sn), reply_markup=main_kb())
-    except TelegramBadRequest:
-        pass
-
-# -------- Entry --------
+# ================== main ==================
 async def main():
-    print("Bot is running…")
-    # 🔥 صف آپدیت‌های قدیمی را پاک کن تا Callbackهای کهنه خطا ندن
+    # پاک کردن آپدیت‌های قدیمی
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # استارت وب‌سرور برای health check
+    asyncio.create_task(start_http_server())
+
+    print("🤖 Bot is running…")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
