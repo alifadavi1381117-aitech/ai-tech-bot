@@ -7,20 +7,16 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# ---- ENV ----
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").strip()  # e.g. https://your-service.onrender.com
-
+PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").strip()  # e.g. https://ai-tech-bot-or63.onrender.com
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not set")
 if not PUBLIC_URL:
     raise ValueError("❌ PUBLIC_URL not set (e.g. https://your-service.onrender.com)")
 
-# ---- Bot/Dispatcher ----
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ---- Handlers ----
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -51,10 +47,14 @@ async def cb_iot(cq: types.CallbackQuery):
     await cq.message.answer("📡 اخبار اینترنت اشیاء…")
     await cq.answer()
 
-# ---- Webhook app ----
+# برای عیب‌یابی: هر پیامی رسید لاگ کنیم
+@dp.message()
+async def any_msg(m: types.Message):
+    print(f"📥 Update from {m.from_user.id}: {m.text!r}")
+
+# ---------- Webhook ----------
 async def on_startup(app: web.Application):
-    # پاک کردن وبهوک قبلی و ست وبهوک جدید
-    webhook_path = f"/webhook/{BOT_TOKEN}"
+    webhook_path = "/webhook"
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(url=PUBLIC_URL + webhook_path)
     print("✅ Webhook set:", PUBLIC_URL + webhook_path)
@@ -65,18 +65,12 @@ async def on_cleanup(app: web.Application):
 
 def build_app() -> web.Application:
     app = web.Application()
-
-    # health check برای Render
     async def ok(_): return web.Response(text="OK")
     app.router.add_get("/", ok)
 
-    # ثبت وبهوک
-    webhook_path = f"/webhook/{BOT_TOKEN}"
+    webhook_path = "/webhook"
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
-
-    # ❗ امضای صحیح برای aiogram 3.x
     setup_application(app, dp, bot=bot)
-
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
@@ -84,4 +78,3 @@ def build_app() -> web.Application:
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     web.run_app(build_app(), host="0.0.0.0", port=port)
-س
