@@ -1,85 +1,82 @@
 import os
 import asyncio
-import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# گرفتن توکن از Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # مثلا: https://ai-tech-bot-or63.onrender.com
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is not set in environment variables.")
+    raise ValueError("❌ BOT_TOKEN not set")
+if not PUBLIC_URL:
+    raise ValueError("❌ PUBLIC_URL not set (e.g. https://your-service.onrender.com)")
 
-# تنظیم Bot و Dispatcher
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ================== وب‌سرور برای Render ==================
-async def start_http_server():
-    app = web.Application()
-
-    async def ok(_):
-        return web.Response(text="OK")
-
-    app.router.add_get("/", ok)
-    port = int(os.getenv("PORT", "8000"))  # Render متغیر PORT رو ست می‌کنه
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
-    await site.start()
-    print(f"✅ HTTP server is listening on 0.0.0.0:{port}")
-
-# ================== هندلرها ==================
+# ---------- handlers ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📰 News", callback_data="news")],
-            [InlineKeyboardButton(text="🤖 AI News", callback_data="ai_news")],
-            [InlineKeyboardButton(text="🔧 Python Code", callback_data="code")],
-            [InlineKeyboardButton(text="📡 IoT", callback_data="iot_news")]
-        ]
-    )
-    await message.answer("سلام 👋\nمن ربات اخبار تکنولوژی و کدهای جذاب هستم.", reply_markup=keyboard)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📰 News", callback_data="news")],
+        [InlineKeyboardButton(text="🤖 AI News", callback_data="ai_news")],
+        [InlineKeyboardButton(text="🔧 Python Code", callback_data="code")],
+        [InlineKeyboardButton(text="📡 IoT", callback_data="iot_news")],
+    ])
+    await message.answer("سلام 👋\nمن ربات اخبار تکنولوژی و کدهای جذاب هستم.", reply_markup=kb)
 
 @dp.callback_query(lambda cq: cq.data == "news")
 async def cb_news(cq: types.CallbackQuery):
-    await cq.message.answer("📰 آخرین اخبار تکنولوژی...")
+    await cq.message.answer("📰 آخرین اخبار تکنولوژی…")
     await cq.answer()
 
 @dp.callback_query(lambda cq: cq.data == "ai_news")
-async def cb_ai_news(cq: types.CallbackQuery):
-    await cq.message.answer("🤖 آخرین اخبار هوش مصنوعی...")
+async def cb_ai(cq: types.CallbackQuery):
+    await cq.message.answer("🤖 آخرین اخبار هوش مصنوعی…")
     await cq.answer()
 
 @dp.callback_query(lambda cq: cq.data == "code")
 async def cb_code(cq: types.CallbackQuery):
-    await cq.message.answer("🔧 یک کد جذاب پایتون:")
-    await cq.message.answer("```python\nprint('Hello AI Bot!')\n```")
+    await cq.message.answer("🔧 یک کد جذاب پایتون:\n<code>print('Hello AI Bot!')</code>")
     await cq.answer()
 
 @dp.callback_query(lambda cq: cq.data == "iot_news")
 async def cb_iot(cq: types.CallbackQuery):
-    await cq.message.answer("📡 اخبار اینترنت اشیاء...")
+    await cq.message.answer("📡 اخبار اینترنت اشیاء…")
     await cq.answer()
 
-# ================== main ==================
-async def main():
-    # پاک کردن آپدیت‌های قدیمی
+# ---------- webhook app ----------
+async def on_startup(app: web.Application):
+    # حذف وبهوک قبلی و ست وبهوک جدید
+    path = f"/webhook/{BOT_TOKEN}"
     await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(url=PUBLIC_URL + path)
+    print("✅ Webhook set:", PUBLIC_URL + path)
 
-    # استارت وب‌سرور برای health check
-    asyncio.create_task(start_http_server())
+async def on_cleanup(app: web.Application):
+    await bot.delete_webhook()
+    await bot.session.close()
 
-    print("🤖 Bot is running…")
-    await dp.start_polling(bot)
+def build_app() -> web.Application:
+    app = web.Application()
+    # مسیر سلامت برای Render
+    async def ok(_): return web.Response(text="OK")
+    app.router.add_get("/", ok)
+
+    # ثبت هندلر وبهوک
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
+    setup_application(app, bot=bot)  # مدیریت lifecycle
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    return app
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.getenv("PORT", "8000"))
+    web.run_app(build_app(), host="0.0.0.0", port=port)
