@@ -5,7 +5,7 @@ import httpx
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.client.default import DefaultBotProperties
+from aiogram.client.default import DefaultBotProperties  # kept for compatibility if you want later
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -19,14 +19,15 @@ log = logging.getLogger("tech-news-bot")
 
 # ───────────────── ENV / Bot ───────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # مثلا: https://your-service.onrender.com
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # e.g. https://your-service.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
 PORT = int(os.getenv("PORT", "10000"))
 
 if not BOT_TOKEN or not PUBLIC_URL:
     raise RuntimeError("Missing required env(s): BOT_TOKEN or PUBLIC_URL")
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="MarkdownV2"))
+# Use plain text by default; avoid MarkdownV2 auto-parsing issues on feed text
+bot = Bot(token=BOT_TOKEN)  # no default parse_mode
 dp = Dispatcher()
 
 # ───────────────── Feeds ───────────────────
@@ -61,9 +62,12 @@ def extract_entry_plain(entry) -> tuple[str, str, str]:
 
 def pick_iot_feed() -> str | None:
     for url in IOT_FEEDS:
-        feed = feedparser.parse(url)
-        if getattr(feed, "entries", []):
-            return url
+        try:
+            feed = feedparser.parse(url)
+            if getattr(feed, "entries", []):
+                return url
+        except Exception as e:
+            log.warning(f"IoT feed parse failed for {url}: {e}")
     return None
 
 async def fetch_html(url: str, timeout: float = 20.0) -> str:
@@ -90,7 +94,14 @@ def main_inline_markup():
 
 # ───────────────── News Flow ───────────────
 async def send_news(cq: types.CallbackQuery, feed_url: str, label: str):
-    feed = feedparser.parse(feed_url)
+    try:
+        feed = feedparser.parse(feed_url)
+    except Exception as e:
+        log.warning(f"Feed parse error for {feed_url}: {e}")
+        await cq.message.answer("❌ خطا در دریافت خبر.", reply_markup=main_menu)
+        await cq.answer()
+        return
+
     entries = getattr(feed, "entries", [])
     if not entries:
         await cq.message.answer("❌ خبری پیدا نشد.", reply_markup=main_menu)
@@ -132,7 +143,8 @@ async def cb_translate(cq: types.CallbackQuery):
     try:
         _, label, lang = cq.data.split(":", 2)
     except Exception:
-        await cq.answer("Bad payload"); return
+        await cq.answer("Bad payload")
+        return
 
     body = cq.message.text or ""
     target = "fa" if lang == "fa" else "en"
@@ -151,7 +163,8 @@ PROGRAMIZ_PY_EXAMPLES = "https://www.programiz.com/python-programming/examples"
 
 def extract_first_code_block(html: str) -> str | None:
     tree = HTMLParser(html)
-    node = tree.css_first("pre, code")
+    # prefer <pre><code> if exists
+    node = tree.css_first("pre code") or tree.css_first("pre, code")
     if node:
         txt = node.text(separator="\n").strip()
         return txt if len(txt) >= 8 else None
@@ -165,8 +178,11 @@ async def cb_pycodes(cq: types.CallbackQuery):
         if code:
             if len(code) > 3500:
                 code = code[:3500] + "…"
-            await cq.message.answer(f"📚 نمونه کد پایتون (Programiz):\n\n```python\n{code}\n```",
-                                    disable_web_page_preview=True)
+            # Explicit Markdown code fence for this message only
+            await cq.message.answer(
+                f"📚 نمونه کد پایتون (Programiz):\n\n```python\n{code}\n```",
+                disable_web_page_preview=True
+            )
             await cq.answer()
             return
     except Exception as e:
@@ -188,19 +204,30 @@ async def on_startup(app: web.Application):
     log.info(f"✅ Webhook set: {webhook_url}")
 
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await bot.session.close()
+    try:
+        await bot.delete_webhook()
+    except Exception as e:
+        log.warning(f"Webhook delete error: {e}")
+    try:
+        await bot.session.close()
+    except Exception as e:
+        log.warning(f"Bot session close error: {e}")
     log.info("🧹 Webhook deleted and session closed")
 
 def build_app():
     app = web.Application()
+
     # Webhook
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
-    # Health check
+    # Health / index endpoints (Render hits "/")
+    async def index(request):
+        return web.Response(text="OK")
     async def health(request):
         return web.Response(text="OK")
+
+    app.router.add_get("/", index)      # HEAD auto-registered; don't add add_head
     app.router.add_get("/health", health)
 
     app.on_startup.append(on_startup)
