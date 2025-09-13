@@ -1,113 +1,128 @@
-# app.py
 import os
 import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import feedparser
+from deep_translator import GoogleTranslator
 
-# ---------- Logging ----------
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+# logging
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tech-news-bot")
 
-# ---------- Globals (lazy-validated) ----------
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").strip()  # e.g. https://your-app.onrender.com
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook").strip()
-WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()  # generate a long random string
+# env vars
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
+PORT = int(os.getenv("PORT", "8000"))
 
-# Create bot/dispatcher objects; defer crash if token missing until startup
-bot = Bot(token=BOT_TOKEN or "0", default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+if not BOT_TOKEN or not PUBLIC_URL:
+    raise RuntimeError("Missing BOT_TOKEN or PUBLIC_URL")
+
+# init bot/dispatcher
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-# ---------- Handlers ----------
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📰 News", callback_data="news")],
-        [InlineKeyboardButton(text="🤖 AI News", callback_data="ai_news")],
-        [InlineKeyboardButton(text="🔧 Python Code", callback_data="code")],
-        [InlineKeyboardButton(text="📡 IoT", callback_data="iot_news")],
-    ])
-    try:
-        await message.answer("سلام 👋\nمن ربات اخبار تکنولوژی و کدهای جذاب هستم.", reply_markup=kb)
-    except Exception as e:
-        log.exception("Failed to send /start response: %s", e)
+# RSS feeds
+NEWS_FEED = "https://feeds.bbci.co.uk/news/technology/rss.xml"
+AI_FEED = "https://techcrunch.com/category/artificial-intelligence/feed/"
+IOT_FEED = "https://www.iotworldtoday.com/feed"
+
+# ----------------- handlers -----------------
+@dp.message(F.text == "/start")
+async def start_cmd(msg: types.Message):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📰 News", callback_data="news")
+    kb.button(text="🤖 AI News", callback_data="ai")
+    kb.button(text="🌐 IoT News", callback_data="iot")
+    kb.adjust(2)
+    await msg.answer("سلام! من ربات اخبار هستم، یکی از گزینه‌ها رو انتخاب کن:", reply_markup=kb.as_markup())
+
+# ----------------- Fetch and show news -----------------
+async def send_news(cq: types.CallbackQuery, feed_url: str, label: str):
+    feed = feedparser.parse(feed_url)
+    if not feed.entries:
+        await cq.message.answer("❌ خبری پیدا نشد")
+        return
+
+    entry = feed.entries[0]  # اولین خبر
+    text = f"🔹 <b>{entry.title}</b>\n{entry.summary}\n🔗 {entry.link}"
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇮🇷 فارسی", callback_data=f"translate:fa:{label}:{entry.link}")
+    kb.button(text="🇬🇧 English", callback_data=f"translate:en:{label}:{entry.link}")
+    kb.adjust(2)
+
+    await cq.message.answer(text, reply_markup=kb.as_markup())
+    await cq.answer()
 
 @dp.callback_query(F.data == "news")
 async def cb_news(cq: types.CallbackQuery):
-    await cq.answer("آخرین اخبار تکنولوژی ✨", show_alert=False)
-    await cq.message.answer("📰 آخرین اخبار تکنولوژی…")
+    await send_news(cq, NEWS_FEED, "news")
 
-@dp.callback_query(F.data == "ai_news")
+@dp.callback_query(F.data == "ai")
 async def cb_ai(cq: types.CallbackQuery):
-    await cq.answer("هوش مصنوعی – به‌روز شد ✅", show_alert=False)
-    await cq.message.answer("🤖 آخرین اخبار هوش مصنوعی…")
+    await send_news(cq, AI_FEED, "ai")
 
-@dp.callback_query(F.data == "code")
-async def cb_code(cq: types.CallbackQuery):
-    await cq.answer("یک نمونه کد آماده شد 💻", show_alert=False)
-    await cq.message.answer("🔧 یک کد جذاب پایتون:\n<code>print('Hello AI Bot!')</code>")
-
-@dp.callback_query(F.data == "iot_news")
+@dp.callback_query(F.data == "iot")
 async def cb_iot(cq: types.CallbackQuery):
-    await cq.answer("IoT به‌روز شد 📡", show_alert=False)
-    await cq.message.answer("📡 اخبار اینترنت اشیاء…")
+    await send_news(cq, IOT_FEED, "iot")
 
-# Debug catch-all (keep lightweight)
-@dp.message()
-async def any_msg(m: types.Message):
-    log.info("Update from %s: %r", m.from_user.id if m.from_user else "unknown", m.text)
+# ----------------- Translate -----------------
+@dp.callback_query(F.data.startswith("translate"))
+async def cb_translate(cq: types.CallbackQuery):
+    _, lang, label, link = cq.data.split(":", 3)
 
-# ---------- Web app / webhook ----------
+    # انتخاب فید بر اساس label
+    if label == "news":
+        feed_url = NEWS_FEED
+    elif label == "ai":
+        feed_url = AI_FEED
+    else:
+        feed_url = IOT_FEED
+
+    feed = feedparser.parse(feed_url)
+    entry = next((e for e in feed.entries if e.link == link), None)
+    if not entry:
+        await cq.answer("❌ خبر پیدا نشد")
+        return
+
+    original = f"{entry.title}\n{entry.summary}"
+    if lang == "fa":
+        translated = GoogleTranslator(source="auto", target="fa").translate(original)
+        await cq.message.answer(f"🇮🇷 {translated}\n\n🔗 {entry.link}")
+    else:
+        await cq.message.answer(f"🇬🇧 {original}\n\n🔗 {entry.link}")
+
+    await cq.answer()
+
+# ----------------- startup/cleanup -----------------
 async def on_startup(app: web.Application):
-    # Validate envs here to avoid import-time crashes
-    missing = []
-    if not BOT_TOKEN: missing.append("BOT_TOKEN")
-    if not PUBLIC_URL: missing.append("PUBLIC_URL")
-    if not WEBHOOK_SECRET: missing.append("WEBHOOK_SECRET")
-    if missing:
-        raise RuntimeError(f"Missing required env(s): {', '.join(missing)}")
-
-    # Set webhook with secret; drop old pending updates
-    await bot.delete_webhook(drop_pending_updates=True)
-    webhook_url = PUBLIC_URL.rstrip("/") + WEBHOOK_PATH
-    await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
-    log.info("✅ Webhook set: %s", webhook_url)
+    webhook_url = f"{PUBLIC_URL}/webhook"
+    await bot.set_webhook(webhook_url, secret_token=WEBHOOK_SECRET)
+    log.info(f"✅ Webhook set: {webhook_url}")
 
 async def on_cleanup(app: web.Application):
-    await bot.delete_webhook()
+    # فقط سشن بسته میشه، وبهوک حذف نمیشه
     await bot.session.close()
-    log.info("🧹 Webhook deleted and session closed")
+    log.info("🧹 Session closed")
 
+# ----------------- aiohttp app -----------------
 def build_app() -> web.Application:
     app = web.Application()
-
-    async def ok(_): return web.Response(text="OK")
-    async def health(_): return web.Response(text="healthy")  # no Telegram calls
-
-    app.router.add_get("/", ok)
-    app.router.add_get("/healthz", health)
-
-    # Register webhook handler with secret verification
-    SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-        # aiogram validates 'X-Telegram-Bot-Api-Secret-Token' header automatically
-        secret_token=WEBHOOK_SECRET or None,
-    ).register(app, path=WEBHOOK_PATH)
-
-    setup_application(app, dp, bot=bot)
+    app["bot"] = bot
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
+
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
+
+    async def healthz(request: web.Request):
+        return web.Response(text="healthy")
+
+    app.router.add_get("/healthz", healthz)
     return app
 
+# ----------------- run -----------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    web.run_app(build_app(), host="0.0.0.0", port=port)
+    web.run_app(build_app(), host="0.0.0.0", port=PORT)
