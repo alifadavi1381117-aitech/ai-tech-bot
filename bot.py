@@ -6,13 +6,13 @@ import httpx
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
-    InlineKeyboardButton, 
+    InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # 🔹 لاگ‌ها
 logging.basicConfig(level=logging.INFO)
@@ -31,9 +31,6 @@ TECH_FEED = "https://feeds.bbci.co.uk/news/technology/rss.xml"
 AI_FEED   = "https://www.artificialintelligence-news.com/feed/"
 IOT_FEED  = "https://iotbusinessnews.com/feed/"
 
-# 🔹 Translator
-translator = Translator()
-
 # ────────────── Helpers ──────────────
 def clean_html(raw_html: str) -> str:
     """پاک کردن تگ‌های HTML غیرمجاز"""
@@ -47,7 +44,6 @@ async def fetch_python_codes():
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(url)
             if r.status_code == 200:
-                # فقط لینک‌ها رو می‌کشیم
                 links = re.findall(r'href="(https://www\.geeksforgeeks\.org/[^"]+)"', r.text)
                 titles = re.findall(r'>([^<]+)</a>', r.text)
                 results = []
@@ -133,13 +129,13 @@ async def cb_codes(cq: types.CallbackQuery):
 @dp.callback_query(F.data.endswith("_fa"))
 async def cb_translate_fa(cq: types.CallbackQuery):
     original = cq.message.text
-    translated = translator.translate(original, dest="fa").text
+    translated = GoogleTranslator(source="auto", target="fa").translate(original)
     await cq.message.answer(f"🇮🇷 {translated}")
 
 @dp.callback_query(F.data.endswith("_en"))
 async def cb_translate_en(cq: types.CallbackQuery):
     original = cq.message.text
-    translated = translator.translate(original, dest="en").text
+    translated = GoogleTranslator(source="auto", target="en").translate(original)
     await cq.message.answer(f"🇬🇧 {translated}")
 
 # ────────────── Webhook ──────────────
