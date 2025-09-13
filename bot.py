@@ -26,7 +26,7 @@ PORT = int(os.getenv("PORT", "10000"))
 if not BOT_TOKEN or not PUBLIC_URL:
     raise RuntimeError("Missing required env(s): BOT_TOKEN or PUBLIC_URL")
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="MarkdownV2"))
 dp = Dispatcher()
 
 # ───────────────── Feeds ───────────────────
@@ -176,7 +176,7 @@ async def cb_pycodes(cq: types.CallbackQuery):
     await cq.answer()
 
 # ───────────────── /start ──────────────────
-@dp.message(F.text == "/start")
+@dp.message(F.text.startswith("/start"))
 async def start_cmd(msg: types.Message):
     await msg.answer("سلام! یکی از گزینه‌ها رو انتخاب کن:", reply_markup=main_inline_markup())
     await msg.answer("🔄 برای برگشت به منوی اصلی /start رو بزن 👇", reply_markup=main_menu)
@@ -198,7 +198,7 @@ def build_app():
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
-    # Health check (HEAD هم نداریم، فقط GET)
+    # Health check
     async def health(request):
         return web.Response(text="OK")
     app.router.add_get("/health", health)
