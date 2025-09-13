@@ -3,6 +3,8 @@ import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 import feedparser
 from deep_translator import GoogleTranslator
 
@@ -17,10 +19,13 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
 PORT = int(os.getenv("PORT", "8000"))
 
 if not BOT_TOKEN or not PUBLIC_URL:
-    raise RuntimeError("Missing BOT_TOKEN or PUBLIC_URL")
+    raise RuntimeError("Missing required env(s): BOT_TOKEN or PUBLIC_URL")
 
 # init bot/dispatcher
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 
 # RSS feeds
@@ -103,7 +108,6 @@ async def on_startup(app: web.Application):
     log.info(f"✅ Webhook set: {webhook_url}")
 
 async def on_cleanup(app: web.Application):
-    # فقط سشن بسته میشه، وبهوک حذف نمیشه
     await bot.session.close()
     log.info("🧹 Session closed")
 
@@ -114,7 +118,7 @@ def build_app() -> web.Application:
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
-    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
 
     async def healthz(request: web.Request):
