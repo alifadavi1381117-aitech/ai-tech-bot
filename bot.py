@@ -1,87 +1,87 @@
 import os
 import logging
-import re
 import feedparser
 import httpx
+from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import (
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+
 from deep_translator import GoogleTranslator
+from selectolax.parser import HTMLParser
 
-# 🔹 لاگ‌ها
+# ───────────────── Logging ─────────────────
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("tech-news-bot")
+log = logging.getLogger("tech-news-bot")
 
-# 🔹 توکن
+# ───────────────── ENV / Bot ───────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN is missing")
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # مثلا: https://your-service.onrender.com
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
+PORT = int(os.getenv("PORT", "10000"))
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+if not BOT_TOKEN or not PUBLIC_URL:
+    raise RuntimeError("Missing required env(s): BOT_TOKEN or PUBLIC_URL")
+
+# پیش‌فرض: بدون parse_mode تا تلگرام HTML رو parse نکنه و ارور نده
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 
-# 🔹 Feeds
+# ───────────────── Feeds ───────────────────
 TECH_FEED = "https://feeds.bbci.co.uk/news/technology/rss.xml"
-AI_FEED   = "https://www.artificialintelligence-news.com/feed/"
-IOT_FEED  = "https://iotbusinessnews.com/feed/"
+AI_FEED   = "https://techcrunch.com/category/artificial-intelligence/feed/"
+IOT_FEEDS = [
+    "https://www.iot-now.com/feed/",
+    "https://www.iotforall.com/feed/",
+    "https://www.iotworldtoday.com/feed/",
+    "https://iotbusinessnews.com/feed/",
+]
 
-# ────────────── Helpers ──────────────
-def clean_html(raw_html: str) -> str:
-    """پاک کردن تگ‌های HTML غیرمجاز"""
-    clean = re.sub(r"<.*?>", "", raw_html)
-    return clean.strip()
+# ───────────────── Helpers ─────────────────
+def html_to_plain(html: str) -> str:
+    """تبدیل HTML به متن ساده‌ی امن؛ حذف script/style و فاصله‌های اضافی"""
+    if not html:
+        return ""
+    tree = HTMLParser(html)
+    for n in tree.css("script, style"):
+        n.decompose()
+    text = tree.text(separator=" ").strip()
+    return " ".join(text.split())
 
-async def fetch_python_codes():
-    """کدهای پایتون از GeeksForGeeks"""
-    url = "https://www.geeksforgeeks.org/python-programming-examples/"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url)
-            if r.status_code == 200:
-                links = re.findall(r'href="(https://www\.geeksforgeeks\.org/[^"]+)"', r.text)
-                titles = re.findall(r'>([^<]+)</a>', r.text)
-                results = []
-                for t, l in zip(titles, links):
-                    if "python" in l:
-                        results.append((t.strip(), l))
-                return results[:5]
-    except Exception as e:
-        logger.error(f"Error fetching python codes: {e}")
-    return []
+def extract_entry_plain(entry) -> tuple[str, str, str]:
+    title = getattr(entry, "title", "") or ""
+    link  = getattr(entry, "link", "") or ""
+    raw   = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+    if not raw and hasattr(entry, "content") and entry.content:
+        val = entry.content[0]
+        raw = val.value if hasattr(val, "value") else str(val)
+    summary = html_to_plain(raw)
+    return title, summary, link
 
-async def send_news(cq: types.CallbackQuery, feed_url: str, prefix: str):
-    feed = feedparser.parse(feed_url)
-    if not feed.entries:
-        await cq.message.answer("❌ چیزی پیدا نشد.")
-        return
+def pick_iot_feed() -> str | None:
+    for url in IOT_FEEDS:
+        feed = feedparser.parse(url)
+        if getattr(feed, "entries", []):
+            return url
+    return None
 
-    entry = feed.entries[0]
-    title = entry.title
-    link = entry.link
-    summary = clean_html(getattr(entry, "summary", ""))
+async def fetch_html(url: str, timeout: float = 20.0) -> str:
+    headers = {"User-Agent": "Mozilla/5.0 (TechNewsBot/1.0)"}
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=timeout) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.text
 
-    text = f"📰 <b>{title}</b>\n\n{summary}\n\n🔗 {link}"
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🇮🇷 فارسی", callback_data=f"{prefix}_fa")
-    kb.button(text="🇬🇧 English", callback_data=f"{prefix}_en")
-    kb.adjust(2)
-
-    await cq.message.answer(text, reply_markup=kb.as_markup())
-
-# ────────────── Keyboards ──────────────
+# ───────────────── Keyboards ───────────────
 main_menu = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="/start")]],
     resize_keyboard=True
 )
 
-def get_main_inline():
+def main_inline_markup():
     kb = InlineKeyboardBuilder()
     kb.button(text="📰 Tech News", callback_data="news")
     kb.button(text="🤖 AI News", callback_data="ai")
@@ -90,21 +90,34 @@ def get_main_inline():
     kb.adjust(2)
     return kb.as_markup()
 
-# ────────────── Handlers ──────────────
-@dp.message(F.text == "/start")
-async def start_cmd(msg: types.Message):
-    await msg.answer(
-        "سلام! یکی از گزینه‌ها رو انتخاب کن:",
-        reply_markup=get_main_inline()
-    )
-    await msg.answer(
-        "🔄 برای برگشت به منوی اصلی /start رو بزن 👇",
-        reply_markup=main_menu
-    )
+# ───────────────── News Flow ───────────────
+async def send_news(cq: types.CallbackQuery, feed_url: str, label: str):
+    feed = feedparser.parse(feed_url)
+    entries = getattr(feed, "entries", [])
+    if not entries:
+        await cq.message.answer("❌ خبری پیدا نشد.", reply_markup=main_menu)
+        await cq.answer()
+        return
+
+    # یک خبر اول را می‌فرستیم
+    entry = entries[0]
+    title, summary, link = extract_entry_plain(entry)
+
+    # متن ساده (بدون parse_mode)
+    text = f"📰 {title}\n\n{summary}\n\n🔗 {link}"
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇮🇷 فارسی", callback_data=f"t:{label}:fa")
+    kb.button(text="🇬🇧 English", callback_data=f"t:{label}:en")
+    kb.adjust(2)
+
+    # parse_mode=None → هیچ HTMLی parse نمی‌شود، پس اروری نداریم
+    await cq.message.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+    await cq.answer()
 
 @dp.callback_query(F.data == "news")
 async def cb_news(cq: types.CallbackQuery):
-    await send_news(cq, TECH_FEED, "news")
+    await send_news(cq, TECH_FEED, "tech")
 
 @dp.callback_query(F.data == "ai")
 async def cb_ai(cq: types.CallbackQuery):
@@ -112,53 +125,89 @@ async def cb_ai(cq: types.CallbackQuery):
 
 @dp.callback_query(F.data == "iot")
 async def cb_iot(cq: types.CallbackQuery):
-    await send_news(cq, IOT_FEED, "iot")
+    chosen = pick_iot_feed()
+    if not chosen:
+        await cq.message.answer("❌ خبر IoT پیدا نشد.", reply_markup=main_menu)
+        await cq.answer()
+        return
+    await send_news(cq, chosen, "iot")
+
+# ───────────────── Translate ───────────────
+@dp.callback_query(F.data.startswith("t:"))
+async def cb_translate(cq: types.CallbackQuery):
+    try:
+        _, label, lang = cq.data.split(":", 2)
+    except Exception:
+        await cq.answer("Bad payload"); return
+
+    # کل متن پیام فعلی
+    body = cq.message.text or ""
+
+    target = "fa" if lang == "fa" else "en"
+    try:
+        translated = GoogleTranslator(source="auto", target=target).translate(body)
+    except Exception as e:
+        log.warning(f"translate error: {e}")
+        translated = body  # fallback
+
+    flag = "🇮🇷" if target == "fa" else "🇬🇧"
+    await cq.message.answer(f"{flag} {translated}", reply_markup=main_menu, disable_web_page_preview=True)
+    await cq.answer()
+
+# ───────────────── Python Snippet ──────────
+PROGRAMIZ_PY_EXAMPLES = "https://www.programiz.com/python-programming/examples"
+
+def extract_first_code_block(html: str) -> str | None:
+    tree = HTMLParser(html)
+    node = tree.css_first("pre, code")
+    if node:
+        txt = node.text(separator="\n").strip()
+        return txt if len(txt) >= 8 else None
+    return None
 
 @dp.callback_query(F.data == "pycodes")
-async def cb_codes(cq: types.CallbackQuery):
-    codes = await fetch_python_codes()
-    if not codes:
-        await cq.message.answer("❌ هیچ کدی پیدا نشد.")
-        return
-    text = "📚 چند نمونه کد پایتون:\n\n"
-    for title, link in codes:
-        text += f"🔹 <a href='{link}'>{clean_html(title)}</a>\n"
-    await cq.message.answer(text)
+async def cb_pycodes(cq: types.CallbackQuery):
+    try:
+        html = await fetch_html(PROGRAMIZ_PY_EXAMPLES, timeout=20.0)
+        code = extract_first_code_block(html)
+        if code:
+            # چون parse_mode=None است، سه‌تایی بک‌تیک امن است
+            if len(code) > 3500:
+                code = code[:3500] + "…"
+            await cq.message.answer(f"📚 نمونه کد پایتون (Programiz):\n\n```python\n{code}\n```",
+                                    disable_web_page_preview=True)
+            await cq.answer()
+            return
+    except Exception as e:
+        log.warning(f"Programiz fetch failed: {e}")
 
-# ترجمه خبر
-@dp.callback_query(F.data.endswith("_fa"))
-async def cb_translate_fa(cq: types.CallbackQuery):
-    original = cq.message.text
-    translated = GoogleTranslator(source="auto", target="fa").translate(original)
-    await cq.message.answer(f"🇮🇷 {translated}")
+    await cq.message.answer("❌ کدی پیدا نشد.", reply_markup=main_menu)
+    await cq.answer()
 
-@dp.callback_query(F.data.endswith("_en"))
-async def cb_translate_en(cq: types.CallbackQuery):
-    original = cq.message.text
-    translated = GoogleTranslator(source="auto", target="en").translate(original)
-    await cq.message.answer(f"🇬🇧 {translated}")
+# ───────────────── /start ──────────────────
+@dp.message(F.text == "/start")
+async def start_cmd(msg: types.Message):
+    await msg.answer("سلام! یکی از گزینه‌ها رو انتخاب کن:", reply_markup=main_inline_markup())
+    await msg.answer("🔄 برای برگشت به منوی اصلی /start رو بزن 👇", reply_markup=main_menu)
 
-# ────────────── Webhook ──────────────
+# ───────────────── Webhook ────────────────
 async def on_startup(app: web.Application):
-    public_url = os.getenv("PUBLIC_URL")
-    if not public_url:
-        raise RuntimeError("❌ Missing PUBLIC_URL")
-    await bot.set_webhook(f"{public_url}/webhook")
-    logger.info(f"✅ Webhook set: {public_url}/webhook")
+    webhook_url = f"{PUBLIC_URL}/webhook"
+    await bot.set_webhook(webhook_url, secret_token=WEBHOOK_SECRET)
+    log.info(f"✅ Webhook set: {webhook_url}")
 
 async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
     await bot.session.close()
-    logger.info("🧹 Webhook deleted and session closed")
+    log.info("🧹 Webhook deleted and session closed")
 
 def build_app():
     app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    web.run_app(build_app(), host="0.0.0.0", port=port)
+    web.run_app(build_app(), host="0.0.0.0", port=PORT)
