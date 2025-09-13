@@ -6,3 +6,5 @@ python-dotenv==1.0.1
 pytz==2024.1
 pydantic==2.5.3
 deep-translator==1.11.4
+selectolax==0.3.21
+
