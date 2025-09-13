@@ -1,6 +1,7 @@
 aiogram==3.7.0
-aiohttp==3.*          # برای وب‌سرور و webhook
-feedparser==6.0.11    # اگر اخبار RSS می‌خونی
-httpx==0.27.2         # درخواست‌های HTTP async
-python-dotenv==1.0.1  # برای لود کردن .env فایل‌ها
-pytz==2024.1          # کار با timezone
+aiohttp==3.9.5
+feedparser==6.0.11
+httpx==0.27.2
+python-dotenv==1.0.1
+pytz==2024.1
+pydantic==2.6.4
