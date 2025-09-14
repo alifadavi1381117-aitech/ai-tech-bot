@@ -2,7 +2,6 @@ import os
 import logging
 import random
 from html import escape as html_escape
-
 import feedparser
 import httpx
 from dotenv import load_dotenv
@@ -42,7 +41,7 @@ IOT_FEED = "https://iotbusinessnews.com/feed/"
 
 # ------------------ ابزارهای کمکی ------------------
 def clean_html(raw_html: str, limit: int | None = 1200) -> str:
-    """حذف تگ‌ها و متن خالص با طول معقول برگرداندن"""
+    """تبدیل خلاصه/بدنه به متن ساده و کوتاه‌شده"""
     tree = HTMLParser(raw_html or "")
     for n in tree.css("script,style"):
         n.decompose()
@@ -65,7 +64,8 @@ def main_inline_markup():
     kb.button(text="📰 اخبار هوش مصنوعی", callback_data="ai_news")
     kb.button(text="📡 اخبار اینترنت اشیا", callback_data="iot_news")
     kb.button(text="🐍 کدهای آماده پایتون", callback_data="py_code")
-    kb.adjust(2, 1)  # دو تا بالا، یکی پایین
+    kb.button(text="🤖 کدهای رباتیک (C++)", callback_data="cpp_robotics")
+    kb.adjust(2, 2)
     return kb.as_markup()
 
 # ------------------ ترجمه متن ------------------
@@ -81,16 +81,15 @@ def fetch_feed_entry(url: str):
     try:
         feed = feedparser.parse(url)
         if feed.entries:
-            return random.choice(feed.entries)  # یکی تصادفی
+            return random.choice(feed.entries)
     except Exception as e:
         logger.error(f"❌ Feed error: {e}")
     return None
 
-# ------------------ گرفتن کد آماده ------------------
+# ------------------ گرفتن کد آماده پایتون ------------------
 async def fetch_python_code():
     index_url = "https://www.programiz.com/python-programming/examples"
     try:
-        # 1) جمع کردن لینک‌های مثال
         html = await fetch_html(index_url, timeout=25)
         tree = HTMLParser(html)
         links = []
@@ -104,12 +103,10 @@ async def fetch_python_code():
                 else:
                     href = "https://www.programiz.com/" + href
                 links.append(href)
-        links = list({x for x in links})  # یکتا
-
+        links = list({x for x in links})
         if not links:
             return None
 
-        # 2) یکی را انتخاب و وارد صفحه شده و کد را بخوان
         ex_url = random.choice(links)
         ex_html = await fetch_html(ex_url, timeout=25)
         t2 = HTMLParser(ex_html)
@@ -118,7 +115,65 @@ async def fetch_python_code():
             txt = node.text(separator="\n").strip()
             return txt if len(txt) >= 8 else None
     except Exception as e:
-        logger.error(f"❌ Error fetching code: {e}")
+        logger.error(f"❌ Error fetching code (py): {e}")
+    return None
+
+# ------------------ گرفتن کد رباتیک C++ ------------------
+async def fetch_cpp_robotics_code():
+    """
+    سعی می‌کنیم از چند منبع معروف نمونه‌کد C++ مرتبط با رباتیک/آردوینو بگیریم.
+    ترتیب: Arduino Built-in Examples -> Arduino Language Reference -> GeeksForGeeks Arduino
+    """
+    sources = [
+        "https://www.arduino.cc/en/Tutorial/BuiltInExamples",
+        "https://www.arduino.cc/reference/en/",
+        "https://www.geeksforgeeks.org/arduino-programming/"
+    ]
+    random.shuffle(sources)
+
+    for src in sources:
+        try:
+            html = await fetch_html(src, timeout=25)
+            tree = HTMLParser(html)
+
+            # از صفحه‌ی لیست مثال‌ها لینک‌های داخلی بردار
+            candidate_links = []
+            for a in tree.css("a"):
+                href = a.attrs.get("href", "")
+                txt = (a.text() or "").lower()
+                # به دنبال آموزش/مثال‌های آردوینو
+                if any(key in href for key in ["/en/Tutorial", "/tutorial", "/reference/en", "/reference/"]):
+                    if href.startswith("/"):
+                        href = "https://www.arduino.cc" + href
+                    elif href.startswith("http"):
+                        pass
+                    else:
+                        href = "https://www.arduino.cc/" + href
+                    candidate_links.append(href)
+
+            candidate_links = list({u for u in candidate_links})
+            random.shuffle(candidate_links)
+
+            # چند لینک را امتحان کن تا به کد برسیم
+            for u in candidate_links[:12]:
+                try:
+                    inner_html = await fetch_html(u, timeout=25)
+                    t2 = HTMLParser(inner_html)
+                    # بیشتر صفحات آردوینو کد را داخل <pre><code> یا فقط <pre> دارند
+                    code_node = t2.css_first("pre code") or t2.css_first("pre")
+                    if code_node:
+                        code_txt = code_node.text(separator="\n").strip()
+                        # اطمینان از اینکه C++/Arduino است (حداقل وجود setup/loop یا #include)
+                        if any(sig in code_txt for sig in ["void setup(", "void loop(", "#include", "pinMode", "digitalWrite"]):
+                            return code_txt if len(code_txt) > 16 else None
+                except Exception:
+                    continue
+
+            # اگر از این منبع چیزی پیدا نشد، منبع بعدی
+        except Exception as e:
+            logger.error(f"❌ Error fetching code (cpp) from {src}: {e}")
+            continue
+
     return None
 
 # ------------------ ارسال خبر ------------------
@@ -134,7 +189,6 @@ async def send_news(cq: CallbackQuery, feed_url: str, tag: str):
     raw_summary = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
     summary = clean_html(raw_summary)
 
-    # امن کردن بخش‌های HTML
     safe_title = html_escape(title)
     safe_link = html_escape(link)
 
@@ -155,10 +209,7 @@ async def send_news(cq: CallbackQuery, feed_url: str, tag: str):
 # ------------------ هندلرها ------------------
 @dp.message(F.text == "/start")
 async def start_cmd(msg: Message):
-    await msg.answer(
-        "سلام 🙂 یکی از گزینه‌ها رو انتخاب کن:",
-        reply_markup=main_inline_markup()
-    )
+    await msg.answer("سلام 🙂 یکی از گزینه‌ها رو انتخاب کن:", reply_markup=main_inline_markup())
 
 @dp.callback_query(F.data == "ai_news")
 async def cb_ai(cq: CallbackQuery):
@@ -172,16 +223,24 @@ async def cb_iot(cq: CallbackQuery):
 async def cb_py(cq: CallbackQuery):
     code = await fetch_python_code()
     if code:
-        # برای تلگرام escape نیاز نیست داخل <pre><code>، ولی بهتره طول محدود کنیم
         safe = html_escape(code)
         await cq.message.answer(f"<b>نمونه کد پایتون:</b>\n\n<pre><code>{safe[:3500]}</code></pre>")
     else:
         await cq.message.answer("❌ کدی پیدا نشد.")
     await cq.answer()
 
+@dp.callback_query(F.data == "cpp_robotics")
+async def cb_cpp(cq: CallbackQuery):
+    code = await fetch_cpp_robotics_code()
+    if code:
+        safe = html_escape(code)
+        await cq.message.answer(f"<b>نمونه کد رباتیک (C++/Arduino):</b>\n\n<pre><code>{safe[:3500]}</code></pre>")
+    else:
+        await cq.message.answer("❌ کد رباتیک C++ پیدا نشد. دوباره امتحان کن.")
+    await cq.answer()
+
 @dp.callback_query(F.data.startswith("tr_"))
 async def cb_translate(cq: CallbackQuery):
-    # tr_fa|ai  یا tr_en|iot
     try:
         data = cq.data.split("|", 1)
         lang = "fa" if "fa" in data[0] else "en"
@@ -189,12 +248,10 @@ async def cb_translate(cq: CallbackQuery):
         await cq.answer("payload نامعتبر")
         return
 
-    # فقط تیتر و خلاصه را ترجمه کنیم (بدون لینک)
     original = (cq.message.html_text or cq.message.text or "")
     base = original.split("🔗")[0].strip()
 
     translated = translate_text(base, lang)
-    # ترجمه را به صورت متن ساده می‌فرستیم که مشکل HTML نداشته باشد
     await cq.message.answer(translated[:3500], disable_web_page_preview=True)
     await cq.answer()
 
@@ -204,9 +261,9 @@ async def on_startup(app: web.Application):
     logger.info(f"✅ Webhook set: {PUBLIC_URL}/webhook")
 
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
+    
     await bot.session.close()
-    logger.info("🧹 Webhook deleted and session closed")
+    logger.info("🧹 Session closed")
 
 # ------------------ ساخت اپ aiohttp ------------------
 def build_app():
@@ -217,19 +274,15 @@ def build_app():
 
     app.router.add_get("/", root)
 
-    # ثبت وبهوک با SimpleRequestHandler
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=WEBHOOK_SECRET
     ).register(app, path="/webhook")
 
-    # یکپارچه سازی دیسپچر و اپ
     setup_application(app, dp, bot=bot)
-
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-
     return app
 
 # ------------------ اجرای اصلی ------------------
