@@ -7,8 +7,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.client.default import DefaultBotProperties
 
 # ------------------- تنظیمات -------------------
 load_dotenv()
@@ -30,7 +30,7 @@ if not PUBLIC_URL:
 
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2)  # ✅ اصلاح شده
 )
 dp = Dispatcher()
 
@@ -192,20 +192,18 @@ async def on_shutdown(app: web.Application):
 def build_app():
     app = web.Application()
 
-    # health check
     async def root(_):
         return web.Response(text="Bot is running!")
 
     app.router.add_get("/", root)
 
-    # ثبت وبهوک با هندلر رسمی aiogram
+    # ✅ درست‌ترین روش در aiogram v3
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=WEBHOOK_SECRET
     ).register(app, path="/webhook")
 
-    # ادغام دیسپچر با اپ
     setup_application(app, dp, bot=bot)
 
     app.on_startup.append(on_startup)
