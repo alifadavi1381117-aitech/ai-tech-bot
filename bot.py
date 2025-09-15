@@ -163,7 +163,13 @@ async def project_detail(cb: CallbackQuery):
     title_h = _html.escape(proj.get("title", ""))
     desc_h = _html.escape(proj.get("description", ""))
     boards_h = _html.escape(", ".join(proj.get("boards", [])))
-    text = f"📌 <b>{title_h}</b>\n\n{desc_h}\n\n⚡️ بوردها: {boards_h}"
+    parts_h = _html.escape(", ".join(proj.get("parts", [])))
+    text = f"📌 <b>{title_h}</b>
+
+{desc_h}
+
+⚡️ بوردها: {boards_h}
+🧩 قطعات: {parts_h if parts_h else '—'}"
 
     await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
