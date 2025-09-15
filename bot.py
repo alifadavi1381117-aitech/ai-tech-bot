@@ -24,9 +24,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-tech-bot")
 
 if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN is missing (check your .env on Render)")
+    raise RuntimeError("❌ BOT_TOKEN is missing (set in Render env)")
 if not PUBLIC_URL:
-    raise RuntimeError("❌ PUBLIC_URL is missing (add to Render env)")
+    raise RuntimeError("❌ PUBLIC_URL is missing (set in Render env)")
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -34,7 +34,7 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# ------------------- لود پروژه‌ها -------------------
+# ------------------- لود دیتابیس ساده -------------------
 with open("projects.json", "r", encoding="utf-8") as f:
     db = json.load(f)
 
@@ -112,12 +112,8 @@ async def project_detail(cb: CallbackQuery):
     title_h = _html.escape(proj.get("title", ""))
     desc_h = _html.escape(proj.get("description", ""))
     boards_h = _html.escape(", ".join(proj.get("boards", [])))
+    text = f"📌 <b>{title_h}</b>\n\n{desc_h}\n\n⚡️ بوردها: {boards_h}"
 
-    text = (
-        f"📌 <b>{title_h}</b>\n\n"
-        f"{desc_h}\n\n"
-        f"⚡️ بوردها: {boards_h}"
-    )
     await cb.message.edit_text(text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
 
@@ -190,21 +186,19 @@ async def on_shutdown(app: web.Application):
 def build_app():
     app = web.Application()
 
-    # health check
     async def root(_):
         return web.Response(text="Bot is running!")
 
     app.router.add_get("/", root)
 
-    # ثبت وبهوک با هندلر رسمی aiogram v3
+    # فقط از هندلر رسمی aiogram استفاده می‌کنیم؛ هیچ parse دستی از update نداریم.
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=WEBHOOK_SECRET,
     ).register(app, path="/webhook")
 
-    # ادغام دیسپچر با اپ
-    setup_application(app, dp, bot=bot)
+    setup_application(app, dp, bot=bot)  # ادغام Dispatcher با اپ
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
