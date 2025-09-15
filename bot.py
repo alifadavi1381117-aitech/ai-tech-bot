@@ -1,246 +1,296 @@
-import os
+# bot.py
 import json
 import logging
-import html
-from pathlib import Path
+import os
+import html as _html
+from typing import Iterable
+
+from aiogram import Dispatcher, F
+from aiogram.client.bot import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.enums import ParseMode
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.filters import CommandStart
-from aiogram.client.default import DefaultBotProperties
+# ------------------- تنظیمات -------------------
+load_dotenv()
 
-from aiohttp import web
-
-# ------------------------------------ تنظیمات لاگر ------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-tech-bot")
 
-# ------------------------------------ لود env ------------------------------------
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN تعریف نشده است")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://example.com/webhook")
-PORT = int(os.getenv("PORT", 10000))
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # اختیاری ولی توصیه می‌شود
+def _require_env(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"❌ {name} is missing (set in Render env)")
+    return v
 
-if not WEBHOOK_URL.endswith("/webhook"):
-    logger.warning("⚠️ WEBHOOK_URL بهتر است با /webhook ختم شود: %s", WEBHOOK_URL)
 
-# ------------------------------------ Bot & Dispatcher ------------------------------------
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+BOT_TOKEN = _require_env("BOT_TOKEN")
+PUBLIC_URL = _require_env("PUBLIC_URL")  # مثل: https://ai-tech-bot-or63.onrender.com
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret123")
+PORT = int(os.getenv("PORT", "10000"))
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
-# ------------------------------------ لود دیتای پروژه‌ها ------------------------------------
-DATA_PATH = Path("data.json")
-if not DATA_PATH.exists():
-    raise RuntimeError("❌ فایل data.json یافت نشد")
+# ------------------- لود دیتابیس ساده -------------------
 
-try:
-    with open(DATA_PATH, "r", encoding="utf-8") as f:
-        DATA = json.load(f)
-    if not isinstance(DATA, dict):
-        raise ValueError("فرمت data.json باید دیکشنری باشد")
-    logger.info("📦 Loaded categories: %s", ", ".join(DATA.keys()))
-except Exception as e:
-    raise RuntimeError(f"❌ خطا در لود data.json: {e}")
-
-# ------------------------------------ دسته‌ها ------------------------------------
-CATEGORY_NAMES = {
-    "robotics": "🤖 رباتیک",
-    "iot": "🌐 IoT",
-    "py_libs": "📚 کتابخانه‌های پایتون",
-}
-
-# ------------------------------------ متن‌ها ------------------------------------
-WELCOME_TEXT = "سلام 👋\nیکی از دسته‌ها رو انتخاب کن:"
-
-# ------------------------------------ توابع کمکی ------------------------------------
-def build_main_menu():
-    kb = InlineKeyboardBuilder()
-    for key, title in CATEGORY_NAMES.items():
-        kb.button(text=title, callback_data=f"cat:{key}")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-def build_back_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔙 بازگشت", callback_data="back:main")
-    return kb.as_markup()
-
-
-def build_projects_menu(category: str):
-    kb = InlineKeyboardBuilder()
-    for p in DATA.get(category, []):
-        title = p.get("title", "بدون عنوان")
-        pid = p.get("id")
-        if pid is not None:
-            kb.button(text=str(title), callback_data=f"proj:{category}:{pid}")
-    kb.button(text="🔙 بازگشت", callback_data="back:main")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-def _csv(items):
-    if not isinstance(items, list):
-        return "—"
-    safe = [html.escape(str(x)) for x in items if x is not None]
-    return ", ".join(safe) if safe else "—"
-
-
-async def project_detail(project: dict) -> str:
-    """ساخت متن نمایش جزئیات پروژه (با escape برای HTML)"""
-    title_h = html.escape(str(project.get("title", "بدون عنوان")))
-    desc = html.escape(str(project.get("description", "—")))
-    boards = _csv(project.get("boards", []))
-    parts = _csv(project.get("parts", []))
-
-    return (
-        f"📌 <b>{title_h}</b>\n\n"
-        f"{desc}\n\n"
-        f"⚡️ بوردها: {boards}\n"
-        f"🧩 قطعات: {parts}"
-    )
-
-
-# ------------------------------------ هندلرها ------------------------------------
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    await message.answer(WELCOME_TEXT, reply_markup=build_main_menu())
-
-
-@dp.callback_query(F.data.startswith("cat:"))
-async def category_handler(callback: CallbackQuery):
-    cat = callback.data.split(":", 1)[1]
-    if cat not in CATEGORY_NAMES:
-        await callback.answer("چنین دسته‌ای وجود ندارد.", show_alert=True)
-        return
-    name = CATEGORY_NAMES[cat]
-    await callback.message.edit_text(f"📂 دسته: {name}", reply_markup=build_projects_menu(cat))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("proj:"))
-async def project_handler(callback: CallbackQuery):
+def _load_db(path: str) -> dict:
     try:
-        _, cat, pid = callback.data.split(":", 2)
-    except ValueError:
-        await callback.answer("داده‌ی نامعتبر", show_alert=True)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+            logger.info("Loaded %s with keys: %s", path, list(data.keys()))
+            return data
+    except FileNotFoundError:
+        logger.warning("%s not found; using empty dataset", path)
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in %s: %s", path, e)
+        return {}
+
+
+DB_PATH = "projects.json"  # ← فایل درست همین است
+db = _load_db(DB_PATH)
+
+robotics = db.get("robotics", [])
+iot = db.get("iot", [])
+py_libs = db.get("py_libs", [])
+
+# ------------------- Helpers -------------------
+
+MAX_MSG = 4096  # Telegram limit
+
+
+def _chunks(s: str, n: int) -> Iterable[str]:
+    for i in range(0, len(s), n):
+        yield s[i : i + n]
+
+
+async def safe_edit_text(message: Message, text: str, **kwargs):
+    if len(text) <= MAX_MSG:
+        return await message.edit_text(text, **kwargs)
+    parts = list(_chunks(text, MAX_MSG))
+    await message.edit_text(parts[0], **kwargs)
+    for p in parts[1:]:
+        await message.answer(p, **kwargs)
+
+
+# ------------------- کیبوردها -------------------
+
+def main_menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🤖 رباتیک", callback_data="cat_robotics")
+    kb.button(text="🌐 اینترنت اشیا (IoT)", callback_data="cat_iot")
+    kb.button(text="🐍 کتابخانه‌های پایتون", callback_data="cat_libs")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def list_projects(category: str):
+    kb = InlineKeyboardBuilder()
+    items = robotics if category == "robotics" else iot
+    for p in items:
+        kb.button(text=p.get("title", "بدون عنوان"), callback_data=f"proj_{category}_{p.get('id','')}")
+    kb.button(text="🔙 بازگشت", callback_data="back_main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def list_libs():
+    kb = InlineKeyboardBuilder()
+    for lib in py_libs:
+        name = lib.get("name", "—")
+        kb.button(text=name, callback_data=f"lib_{name}")
+    kb.button(text="🔙 بازگشت", callback_data="back_main")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def code_options(category: str, proj_id: str):
+    kb = InlineKeyboardBuilder()
+    for lang in ["c", "cpp", "micropython"]:
+        kb.button(text=lang.upper(), callback_data=f"code_{category}_{proj_id}_{lang}")
+    kb.button(text="🔙 بازگشت", callback_data=f"back_projlist_{category}")
+    kb.adjust(3)
+    return kb.as_markup()
+
+
+def back_to_libs():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 بازگشت", callback_data="cat_libs")
+    return kb.as_markup()
+
+# ------------------- هندلرها -------------------
+
+@dp.message(CommandStart())
+async def start_cmd(msg: Message):
+    if not db:
+        await msg.answer(
+            "⚠️ هنوز دیتابیس خالی است (projects.json پیدا نشد یا خالیه). "
+            "بعد از اضافه‌کردن فایل، دوباره /start را بزن."
+        )
         return
-
-    project = next((p for p in DATA.get(cat, []) if str(p.get("id")) == pid), None)
-
-    if not project:
-        await callback.message.edit_text("❌ پروژه موردنظر پیدا نشد.", reply_markup=build_back_menu())
-        await callback.answer()
-        return
-
-    text = await project_detail(project)
-    await callback.message.edit_text(text, reply_markup=build_back_menu())
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "back:main")
-async def back_main(callback: CallbackQuery):
-    await callback.message.edit_text(WELCOME_TEXT, reply_markup=build_main_menu())
-    await callback.answer()
-
-
-# ------------------------------------ وب‌هوک و وب‌سرور ------------------------------------
-async def on_startup(app: web.Application):
-    await bot.set_webhook(
-        WEBHOOK_URL,
-        drop_pending_updates=True,
-        secret_token=WEBHOOK_SECRET if WEBHOOK_SECRET else None,
+    await msg.answer(
+        "سلام 👋\nبه ربات آموزشی خوش اومدی!\nیک دسته‌بندی انتخاب کن:",
+        reply_markup=main_menu(),
     )
-    logger.info("✅ Webhook set: %s", WEBHOOK_URL)
 
+@dp.message(F.text)
+async def fallback(msg: Message):
+    await msg.answer("برای شروع از منوی زیر استفاده کن:", reply_markup=main_menu())
+
+@dp.callback_query(F.data.startswith("cat_"))
+async def open_category(cb: CallbackQuery):
+    cat = cb.data.split("_", 1)[1]
+    if cat == "robotics":
+        await safe_edit_text(cb.message, "🤖 پروژه‌های رباتیک:", reply_markup=list_projects("robotics"))
+    elif cat == "iot":
+        await safe_edit_text(cb.message, "🌐 پروژه‌های اینترنت اشیا:", reply_markup=list_projects("iot"))
+    elif cat == "libs":
+        await safe_edit_text(cb.message, "🐍 کتابخانه‌های پایتون:", reply_markup=list_libs())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("proj_"))
+async def project_detail(cb: CallbackQuery):
+    _, cat, proj_id = cb.data.split("_", 2)
+    items = robotics if cat == "robotics" else iot
+    proj = next((p for p in items if p.get("id") == proj_id), None)
+    if not proj:
+        await cb.answer("❌ پروژه پیدا نشد")
+        return
+
+    title_h = _html.escape(proj.get("title", ""))
+    desc_h = _html.escape(proj.get("description", ""))
+    boards_h = _html.escape(", ".join(proj.get("boards", [])))
+    parts_h = _html.escape(", ".join(proj.get("parts", [])))
+
+    # رشته‌ی چندخطی امن؛ بدون خطای unterminated string
+    text = f"""📌 <b>{title_h}</b>
+
+{desc_h}
+
+⚡️ بوردها: {boards_h or '—'}
+🧩 قطعات: {parts_h or '—'}"""
+
+    await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("code_"))
+async def send_code(cb: CallbackQuery):
+    _, cat, proj_id, lang = cb.data.split("_", 3)
+    items = robotics if cat == "robotics" else iot
+    proj = next((p for p in items if p.get("id") == proj_id), None)
+    if not proj:
+        await cb.answer("❌ پروژه پیدا نشد")
+        return
+
+    code_raw = proj.get("code", {}).get(lang)
+    if not code_raw:
+        await cb.answer("کدی برای این زبان موجود نیست")
+        return
+
+    title_h = _html.escape(proj.get("title", ""))
+
+    # HTML escape برای نمایش امن در <pre><code>
+    code_h = _html.escape(code_raw)
+    preview = f"📌 <b>{title_h}</b> - {lang.upper()}\n\n"
+    html_block = f"<pre><code>{code_h}</code></pre>"
+    text = preview + html_block
+
+    # اگر متن طولانی بود، به‌صورت فایل ارسال می‌کنیم
+    if len(text) <= 4000:
+        await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
+    else:
+        filename = f"{proj.get('title','project')}_{lang}.txt".replace(" ", "_")
+        doc = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
+        await cb.message.answer_document(
+            doc,
+            caption=f"📌 {proj.get('title','')} - {lang.upper()}",
+            reply_markup=code_options(cat, proj_id),
+        )
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("lib_"))
+async def lib_detail(cb: CallbackQuery):
+    lib_name = cb.data.split("_", 1)[1]
+    lib = next((l for l in py_libs if l.get("name") == lib_name), None)
+    if not lib:
+        await cb.answer("❌ کتابخانه پیدا نشد")
+        return
+
+    name_h = _html.escape(lib.get("name", ""))
+    cat_h = _html.escape(lib.get("category", ""))
+    desc_h = _html.escape(lib.get("description", ""))
+    install_h = _html.escape(lib.get("install", ""))
+    example_h = _html.escape(lib.get("example", ""))
+
+    text = (
+        f"🐍 <b>{name_h}</b>\n"
+        f"📂 دسته: {cat_h}\n\n"
+        f"{desc_h}\n\n"
+        f"📦 نصب:\n<code>{install_h}</code>\n\n"
+        f"💡 مثال:\n<pre><code>{example_h}</code></pre>"
+    )
+    await safe_edit_text(cb.message, text, reply_markup=back_to_libs())
+    await cb.answer()
+
+# ------------------- بازگشت -------------------
+
+@dp.callback_query(F.data == "back_main")
+async def back_main(cb: CallbackQuery):
+    await safe_edit_text(cb.message, "🔙 بازگشت به منوی اصلی:", reply_markup=main_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("back_projlist_"))
+async def back_projlist(cb: CallbackQuery):
+    cat = cb.data.split("_", 2)[2]
+    await safe_edit_text(
+        cb.message,
+        f"🔙 بازگشت به لیست پروژه‌های {cat}:",
+        reply_markup=list_projects(cat),
+    )
+    await cb.answer()
+
+# ------------------- وبهوک -------------------
+
+async def on_startup(app: web.Application):
+    await bot.set_webhook(f"{PUBLIC_URL}/webhook", secret_token=WEBHOOK_SECRET)
+    logger.info(f"✅ Webhook set: {PUBLIC_URL}/webhook")
 
 async def on_shutdown(app: web.Application):
-    try:
-        await bot.delete_webhook()
-    finally:
-        await bot.session.close()
-    logger.info("🧹 Webhook deleted and session closed")
-
-
-async def handle_webhook(request: web.Request):
-    # تلگرام درخواست JSON می‌فرستد
-    try:
-        body = await request.json()
-    except Exception:
-        # در صورت خطا، برای دیباگ متن خام را می‌خوانیم
-        raw = await request.text()
-        logger.error("❌ Invalid JSON body: %s", raw[:500])
-        return web.Response(status=400, text="bad request")
-
-    logger.info("📩 Update received: %s", str(body)[:500])
-
-    try:
-        await dp.feed_webhook_update(bot, body, request.headers)
-    except Exception as e:
-        logger.exception("❌ Error while processing update: %s", e)
-        # همواره 200 بده تا تلگرام دوباره سعی نکند؛ خطا را لاگ کردیم
-    return web.Response(text="ok")
-
-
-async def root_get(request: web.Request):
-    return web.Response(text="AI Tech Bot is running!")
-
+    # برای کاهش قطع‌ووصلی، وبهوک را پاک نمی‌کنیم؛ فقط سشن را می‌بندیم
+    await bot.session.close()
+    logger.info("Session closed")
 
 def build_app():
     app = web.Application()
-    app.router.add_post("/webhook", handle_webhook)
-    app.router.add_get("/", root_get)
 
-    # ثبت استارتاپ/شات‌داون (async صحیح)
+    async def root_get(_):
+        # برای health/check از Render
+        return web.Response(text="Bot is running!")
+
+    app.router.add_get("/", root_get)  # GET کافیست؛ aiohttp خودش HEAD را هندل می‌کند.
+
+    # هندلر رسمی aiogram برای وبهوک (بدون parse دستی)
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    ).register(app, path="/webhook")
+
+    setup_application(app, dp, bot=bot)  # ادغام Dispatcher با اپ
+
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-
     return app
 
-
 if __name__ == "__main__":
-    try:
-        app = build_app()
-        web.run_app(app, host="0.0.0.0", port=PORT)
-    except Exception as e:
-        logger.exception("❌ Server crashed: %s", e)
-
-"""
-نمونه‌ی data.json (در کنار فایل اصلی ذخیره کنید):
-{
-  "robotics": [
-    {
-      "id": 1,
-      "title": "بازوی رباتیک ساده",
-      "description": "کنترل سروو با آردوینو",
-      "boards": ["Arduino UNO"],
-      "parts": ["SG90", "Potentiometer"]
-    }
-  ],
-  "iot": [
-    {
-      "id": "esp-01",
-      "title": "دماسنج آنلاین",
-      "description": "ارسال دما به MQTT",
-      "boards": ["ESP8266"],
-      "parts": ["DHT22"]
-    }
-  ],
-  "py_libs": [
-    {
-      "id": 101,
-      "title": "نمونه‌ی FastAPI",
-      "description": "REST ساده برای دمو",
-      "boards": [],
-      "parts": []
-    }
-  ]
-}
-"""
+    web.run_app(build_app(), host="0.0.0.0", port=PORT)
