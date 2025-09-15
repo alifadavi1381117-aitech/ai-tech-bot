@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import html as _html
+from typing import Iterable
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -17,16 +18,21 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret123")
-PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # ⬅️ require explicit secret
+PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-tech-bot")
 
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN is missing (set in Render env)")
-if not PUBLIC_URL:
-    raise RuntimeError("❌ PUBLIC_URL is missing (set in Render env)")
+def _require_env(name: str):
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"❌ {name} is missing (set in Render env)")
+    return v
+
+BOT_TOKEN = _require_env("BOT_TOKEN")
+PUBLIC_URL = _require_env("PUBLIC_URL")
+WEBHOOK_SECRET = _require_env("WEBHOOK_SECRET")
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -35,12 +41,40 @@ bot = Bot(
 dp = Dispatcher()
 
 # ------------------- لود دیتابیس ساده -------------------
-with open("projects.json", "r", encoding="utf-8") as f:
-    db = json.load(f)
+def _load_db(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except FileNotFoundError:
+        logger.warning("projects.json not found; using empty dataset")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in projects.json: %s", e)
+        return {}
 
+db = _load_db("projects.json")
 robotics = db.get("robotics", [])
 iot = db.get("iot", [])
 py_libs = db.get("py_libs", [])
+
+# ------------------- helpers -------------------
+def _chunks(s: str, n: int) -> Iterable[str]:
+    """Yield chunks of max length n (Telegram hard limit ~4096)."""
+    for i in range(0, len(s), n):
+        yield s[i:i+n]
+
+MAX_MSG = 4096  # Telegram limit
+
+async def safe_edit_text(message, text: str, **kwargs):
+    if len(text) <= MAX_MSG:
+        return await message.edit_text(text, **kwargs)
+    # Split on safe boundaries inside <pre><code> if possible
+    parts = list(_chunks(text, MAX_MSG))
+    # First edit current message
+    await message.edit_text(parts[0], **kwargs)
+    # Then send the rest as new messages
+    for p in parts[1:]:
+        await message.answer(p, **kwargs)
 
 # ------------------- کیبوردها -------------------
 def main_menu():
@@ -55,7 +89,7 @@ def list_projects(category: str):
     kb = InlineKeyboardBuilder()
     items = robotics if category == "robotics" else iot
     for p in items:
-        kb.button(text=p["title"], callback_data=f"proj_{category}_{p['id']}")
+        kb.button(text=p.get("title", "بدون عنوان"), callback_data=f"proj_{category}_{p.get('id','')}")
     kb.button(text="🔙 بازگشت", callback_data="back_main")
     kb.adjust(1)
     return kb.as_markup()
@@ -63,7 +97,8 @@ def list_projects(category: str):
 def list_libs():
     kb = InlineKeyboardBuilder()
     for lib in py_libs:
-        kb.button(text=lib["name"], callback_data=f"lib_{lib['name']}")
+        name = lib.get("name", "—")
+        kb.button(text=name, callback_data=f"lib_{name}")
     kb.button(text="🔙 بازگشت", callback_data="back_main")
     kb.adjust(2)
     return kb.as_markup()
@@ -93,18 +128,18 @@ async def start_cmd(msg: Message):
 async def open_category(cb: CallbackQuery):
     cat = cb.data.split("_", 1)[1]
     if cat == "robotics":
-        await cb.message.edit_text("🤖 پروژه‌های رباتیک:", reply_markup=list_projects("robotics"))
+        await safe_edit_text(cb.message, "🤖 پروژه‌های رباتیک:", reply_markup=list_projects("robotics"))
     elif cat == "iot":
-        await cb.message.edit_text("🌐 پروژه‌های اینترنت اشیا:", reply_markup=list_projects("iot"))
+        await safe_edit_text(cb.message, "🌐 پروژه‌های اینترنت اشیا:", reply_markup=list_projects("iot"))
     elif cat == "libs":
-        await cb.message.edit_text("🐍 کتابخانه‌های پایتون:", reply_markup=list_libs())
+        await safe_edit_text(cb.message, "🐍 کتابخانه‌های پایتون:", reply_markup=list_libs())
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("proj_"))
 async def project_detail(cb: CallbackQuery):
     _, cat, proj_id = cb.data.split("_", 2)
     items = robotics if cat == "robotics" else iot
-    proj = next((p for p in items if p["id"] == proj_id), None)
+    proj = next((p for p in items if p.get("id") == proj_id), None)
     if not proj:
         await cb.answer("❌ پروژه پیدا نشد")
         return
@@ -114,14 +149,14 @@ async def project_detail(cb: CallbackQuery):
     boards_h = _html.escape(", ".join(proj.get("boards", [])))
     text = f"📌 <b>{title_h}</b>\n\n{desc_h}\n\n⚡️ بوردها: {boards_h}"
 
-    await cb.message.edit_text(text, reply_markup=code_options(cat, proj_id))
+    await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("code_"))
 async def send_code(cb: CallbackQuery):
     _, cat, proj_id, lang = cb.data.split("_", 3)
     items = robotics if cat == "robotics" else iot
-    proj = next((p for p in items if p["id"] == proj_id), None)
+    proj = next((p for p in items if p.get("id") == proj_id), None)
     if not proj:
         await cb.answer("❌ پروژه پیدا نشد")
         return
@@ -131,13 +166,13 @@ async def send_code(cb: CallbackQuery):
     code_h = _html.escape(code_raw)
 
     text = f"📌 <b>{title_h}</b> - {lang.upper()}\n\n<pre><code>{code_h}</code></pre>"
-    await cb.message.edit_text(text, reply_markup=code_options(cat, proj_id))
+    await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("lib_"))
 async def lib_detail(cb: CallbackQuery):
     lib_name = cb.data.split("_", 1)[1]
-    lib = next((l for l in py_libs if l["name"] == lib_name), None)
+    lib = next((l for l in py_libs if l.get("name") == lib_name), None)
     if not lib:
         await cb.answer("❌ کتابخانه پیدا نشد")
         return
@@ -155,19 +190,20 @@ async def lib_detail(cb: CallbackQuery):
         f"📦 نصب:\n<code>{install_h}</code>\n\n"
         f"💡 مثال:\n<pre><code>{example_h}</code></pre>"
     )
-    await cb.message.edit_text(text, reply_markup=back_to_libs())
+    await safe_edit_text(cb.message, text, reply_markup=back_to_libs())
     await cb.answer()
 
 # ------------------- بازگشت -------------------
 @dp.callback_query(F.data == "back_main")
 async def back_main(cb: CallbackQuery):
-    await cb.message.edit_text("🔙 بازگشت به منوی اصلی:", reply_markup=main_menu())
+    await safe_edit_text(cb.message, "🔙 بازگشت به منوی اصلی:", reply_markup=main_menu())
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("back_projlist_"))
 async def back_projlist(cb: CallbackQuery):
     cat = cb.data.split("_", 2)[2]
-    await cb.message.edit_text(
+    await safe_edit_text(
+        cb.message,
         f"🔙 بازگشت به لیست پروژه‌های {cat}:",
         reply_markup=list_projects(cat),
     )
@@ -179,26 +215,30 @@ async def on_startup(app: web.Application):
     logger.info(f"✅ Webhook set: {PUBLIC_URL}/webhook")
 
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
+    # Optional: keep webhook to avoid brief downtime during restarts (comment out next 2 lines)
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.session.close()
     logger.info("🧹 Webhook deleted and session closed")
 
 def build_app():
     app = web.Application()
 
-    async def root(_):
+    async def root_get(_):
         return web.Response(text="Bot is running!")
 
-    app.router.add_get("/", root)
+    async def root_head(_):
+        return web.Response(text="")  # 200 for Render HEAD checks
 
-    # فقط از هندلر رسمی aiogram استفاده می‌کنیم؛ هیچ parse دستی از update نداریم.
+    app.router.add_get("/", root_get)
+    app.router.add_head("/", root_head)
+
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=WEBHOOK_SECRET,
     ).register(app, path="/webhook")
 
-    setup_application(app, dp, bot=bot)  # ادغام Dispatcher با اپ
+    setup_application(app, dp, bot=bot)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
