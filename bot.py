@@ -2,13 +2,12 @@ import json
 import logging
 import os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.client.default import DefaultBotProperties
 
 # ------------------- تنظیمات -------------------
 load_dotenv()
@@ -17,10 +16,7 @@ PUBLIC_URL = os.getenv("PUBLIC_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret123")
 PORT = int(os.getenv("PORT", 10000))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-tech-bot")
 
 if not BOT_TOKEN:
@@ -28,23 +24,16 @@ if not BOT_TOKEN:
 if not PUBLIC_URL:
     raise RuntimeError("PUBLIC_URL is missing")
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2)  # ✅ اصلاح شده
-)
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN_V2)
 dp = Dispatcher()
 
 # ------------------- لود پروژه‌ها -------------------
-try:
-    with open("projects.json", "r", encoding="utf-8") as f:
-        db = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError) as e:
-    logger.error(f"❌ خطا در لود projects.json: {e}")
-    db = {"robotics": [], "iot": [], "py_libs": []}
+with open("projects.json", "r", encoding="utf-8") as f:
+    db = json.load(f)
 
-robotics = db.get("robotics", [])
-iot = db.get("iot", [])
-py_libs = db.get("py_libs", [])
+robotics = db["robotics"]
+iot = db["iot"]
+py_libs = db["py_libs"]
 
 # ------------------- کیبوردها -------------------
 def main_menu():
@@ -76,9 +65,8 @@ def code_options(category: str, proj_id: str):
     kb = InlineKeyboardBuilder()
     for lang in ["c", "cpp", "micropython"]:
         kb.button(text=lang.upper(), callback_data=f"code_{category}_{proj_id}_{lang}")
-    kb.button(text="📥 دانلود فایل", callback_data=f"codefile_{category}_{proj_id}")
     kb.button(text="🔙 بازگشت", callback_data=f"back_projlist_{category}")
-    kb.adjust(2)
+    kb.adjust(3)
     return kb.as_markup()
 
 def back_to_libs():
@@ -130,25 +118,6 @@ async def send_code(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
 
-@dp.callback_query(F.data.startswith("codefile_"))
-async def send_code_file(cb: CallbackQuery):
-    _, cat, proj_id = cb.data.split("_", 2)
-    items = robotics if cat == "robotics" else iot
-    proj = next((p for p in items if p["id"] == proj_id), None)
-    if not proj:
-        await cb.answer("❌ پیدا نشد")
-        return
-    if not proj.get("code"):
-        await cb.answer("❌ کدی موجود نیست")
-        return
-    filename = f"{proj['id']}_code.txt"
-    with open(filename, "w", encoding="utf-8") as f:
-        for lang, code in proj["code"].items():
-            f.write(f"// {lang.upper()}\n{code}\n\n")
-    await cb.message.answer_document(FSInputFile(filename))
-    os.remove(filename)
-    await cb.answer("📥 فایل ارسال شد")
-
 @dp.callback_query(F.data.startswith("lib_"))
 async def lib_detail(cb: CallbackQuery):
     lib_name = cb.data.split("_", 1)[1]
@@ -175,8 +144,10 @@ async def back_main(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("back_projlist_"))
 async def back_projlist(cb: CallbackQuery):
     cat = cb.data.split("_")[2]
-    title = "🤖 پروژه‌های رباتیک:" if cat == "robotics" else "🌐 پروژه‌های اینترنت اشیا:"
-    await cb.message.edit_text(title, reply_markup=list_projects(cat))
+    await cb.message.edit_text(
+        f"🔙 بازگشت به لیست پروژه‌های {cat}:",
+        reply_markup=list_projects(cat),
+    )
     await cb.answer()
 
 # ------------------- وبهوک -------------------
@@ -192,18 +163,20 @@ async def on_shutdown(app: web.Application):
 def build_app():
     app = web.Application()
 
+    # health check
     async def root(_):
         return web.Response(text="Bot is running!")
 
     app.router.add_get("/", root)
 
-    # ✅ درست‌ترین روش در aiogram v3
+    # ثبت وبهوک با هندلر رسمی aiogram v3
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=WEBHOOK_SECRET
     ).register(app, path="/webhook")
 
+    # ادغام دیسپچر با اپ
     setup_application(app, dp, bot=bot)
 
     app.on_startup.append(on_startup)
