@@ -1,14 +1,15 @@
-# bot.py
 import json
 import logging
 import os
 import html as _html
 from typing import Iterable
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Dispatcher, F
+from aiogram.client.bot import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery
+from aiogram.filters import CommandStart
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -16,15 +17,12 @@ from dotenv import load_dotenv
 
 # ------------------- تنظیمات -------------------
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # ⬅️ require explicit secret
-PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-tech-bot")
 
-def _require_env(name: str):
+
+def _require_env(name: str) -> str:
     v = os.getenv(name)
     if not v:
         raise RuntimeError(f"❌ {name} is missing (set in Render env)")
@@ -33,14 +31,16 @@ def _require_env(name: str):
 BOT_TOKEN = _require_env("BOT_TOKEN")
 PUBLIC_URL = _require_env("PUBLIC_URL")
 WEBHOOK_SECRET = _require_env("WEBHOOK_SECRET")
+PORT = int(os.getenv("PORT", "10000"))
 
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
 
 # ------------------- لود دیتابیس ساده -------------------
+
 def _load_db(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -52,31 +52,33 @@ def _load_db(path: str) -> dict:
         logger.error("Invalid JSON in projects.json: %s", e)
         return {}
 
+
 db = _load_db("projects.json")
 robotics = db.get("robotics", [])
 iot = db.get("iot", [])
 py_libs = db.get("py_libs", [])
 
-# ------------------- helpers -------------------
-def _chunks(s: str, n: int) -> Iterable[str]:
-    """Yield chunks of max length n (Telegram hard limit ~4096)."""
-    for i in range(0, len(s), n):
-        yield s[i:i+n]
+# ------------------- Helpers -------------------
 
 MAX_MSG = 4096  # Telegram limit
 
-async def safe_edit_text(message, text: str, **kwargs):
+
+def _chunks(s: str, n: int) -> Iterable[str]:
+    for i in range(0, len(s), n):
+        yield s[i : i + n]
+
+
+async def safe_edit_text(message: Message, text: str, **kwargs):
     if len(text) <= MAX_MSG:
         return await message.edit_text(text, **kwargs)
-    # Split on safe boundaries inside <pre><code> if possible
     parts = list(_chunks(text, MAX_MSG))
-    # First edit current message
     await message.edit_text(parts[0], **kwargs)
-    # Then send the rest as new messages
     for p in parts[1:]:
         await message.answer(p, **kwargs)
 
+
 # ------------------- کیبوردها -------------------
+
 def main_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="🤖 رباتیک", callback_data="cat_robotics")
@@ -84,6 +86,7 @@ def main_menu():
     kb.button(text="🐍 کتابخانه‌های پایتون", callback_data="cat_libs")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def list_projects(category: str):
     kb = InlineKeyboardBuilder()
@@ -94,6 +97,7 @@ def list_projects(category: str):
     kb.adjust(1)
     return kb.as_markup()
 
+
 def list_libs():
     kb = InlineKeyboardBuilder()
     for lib in py_libs:
@@ -103,6 +107,7 @@ def list_libs():
     kb.adjust(2)
     return kb.as_markup()
 
+
 def code_options(category: str, proj_id: str):
     kb = InlineKeyboardBuilder()
     for lang in ["c", "cpp", "micropython"]:
@@ -111,18 +116,28 @@ def code_options(category: str, proj_id: str):
     kb.adjust(3)
     return kb.as_markup()
 
+
 def back_to_libs():
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 بازگشت", callback_data="cat_libs")
     return kb.as_markup()
 
+
 # ------------------- هندلرها -------------------
-@dp.message(F.text == "/start")
+
+@dp.message(CommandStart())
 async def start_cmd(msg: Message):
     await msg.answer(
         "سلام 👋\nبه ربات آموزشی خوش اومدی!\nیک دسته‌بندی انتخاب کن:",
         reply_markup=main_menu(),
     )
+
+
+@dp.message(F.text)
+async def fallback(msg: Message):
+    # هر پیام متنی را به منوی اصلی هدایت می‌کنیم
+    await msg.answer("برای شروع از منوی زیر استفاده کن:", reply_markup=main_menu())
+
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def open_category(cb: CallbackQuery):
@@ -134,6 +149,7 @@ async def open_category(cb: CallbackQuery):
     elif cat == "libs":
         await safe_edit_text(cb.message, "🐍 کتابخانه‌های پایتون:", reply_markup=list_libs())
     await cb.answer()
+
 
 @dp.callback_query(F.data.startswith("proj_"))
 async def project_detail(cb: CallbackQuery):
@@ -152,6 +168,7 @@ async def project_detail(cb: CallbackQuery):
     await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
     await cb.answer()
 
+
 @dp.callback_query(F.data.startswith("code_"))
 async def send_code(cb: CallbackQuery):
     _, cat, proj_id, lang = cb.data.split("_", 3)
@@ -161,13 +178,31 @@ async def send_code(cb: CallbackQuery):
         await cb.answer("❌ پروژه پیدا نشد")
         return
 
-    code_raw = proj.get("code", {}).get(lang, "// کد موجود نیست")
+    code_raw = proj.get("code", {}).get(lang)
+    if not code_raw:
+        await cb.answer("کدی برای این زبان موجود نیست")
+        return
+
     title_h = _html.escape(proj.get("title", ""))
     code_h = _html.escape(code_raw)
 
-    text = f"📌 <b>{title_h}</b> - {lang.upper()}\n\n<pre><code>{code_h}</code></pre>"
-    await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
+    preview = f"📌 <b>{title_h}</b> - {lang.upper()}\n\n"
+    html_block = f"<pre><code>{code_h}</code></pre>"
+    text = preview + html_block
+
+    # اگر متن طولانی شد به‌صورت فایل ارسال می‌کنیم
+    if len(text) <= 4000:
+        await safe_edit_text(cb.message, text, reply_markup=code_options(cat, proj_id))
+    else:
+        filename = f"{proj.get('title','project')}_{lang}.txt".replace(" ", "_")
+        doc = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
+        await cb.message.answer_document(
+            doc,
+            caption=f"📌 {proj.get('title','')} - {lang.upper()}",
+            reply_markup=code_options(cat, proj_id),
+        )
     await cb.answer()
+
 
 @dp.callback_query(F.data.startswith("lib_"))
 async def lib_detail(cb: CallbackQuery):
@@ -193,11 +228,14 @@ async def lib_detail(cb: CallbackQuery):
     await safe_edit_text(cb.message, text, reply_markup=back_to_libs())
     await cb.answer()
 
+
 # ------------------- بازگشت -------------------
+
 @dp.callback_query(F.data == "back_main")
 async def back_main(cb: CallbackQuery):
     await safe_edit_text(cb.message, "🔙 بازگشت به منوی اصلی:", reply_markup=main_menu())
     await cb.answer()
+
 
 @dp.callback_query(F.data.startswith("back_projlist_"))
 async def back_projlist(cb: CallbackQuery):
@@ -209,16 +247,19 @@ async def back_projlist(cb: CallbackQuery):
     )
     await cb.answer()
 
+
 # ------------------- وبهوک -------------------
+
 async def on_startup(app: web.Application):
     await bot.set_webhook(f"{PUBLIC_URL}/webhook", secret_token=WEBHOOK_SECRET)
     logger.info(f"✅ Webhook set: {PUBLIC_URL}/webhook")
 
+
 async def on_shutdown(app: web.Application):
-    # Optional: keep webhook to avoid brief downtime during restarts (comment out next 2 lines)
-    await bot.delete_webhook(drop_pending_updates=True)
+    # برای جلوگیری از قطع اضافی وبهوک در رولینگ ری‌استارت، فقط سشن را می‌بندیم
     await bot.session.close()
-    logger.info("🧹 Webhook deleted and session closed")
+    logger.info("Session closed")
+
 
 def build_app():
     app = web.Application()
@@ -227,7 +268,7 @@ def build_app():
         return web.Response(text="Bot is running!")
 
     async def root_head(_):
-        return web.Response(text="")  # 200 for Render HEAD checks
+        return web.Response(text="")
 
     app.router.add_get("/", root_get)
     app.router.add_head("/", root_head)
@@ -243,6 +284,7 @@ def build_app():
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
+
 
 if __name__ == "__main__":
     web.run_app(build_app(), host="0.0.0.0", port=PORT)
