@@ -266,12 +266,7 @@ def build_app():
 
     async def root_get(_):
         return web.Response(text="Bot is running!")
-
-    async def root_head(_):
-        return web.Response(text="")
-
-    app.router.add_get("/", root_get)
-    app.router.add_head("/", root_head)
+    app.router.add_get("/", root_get)  # GET and HEAD (auto)
 
     SimpleRequestHandler(
         dispatcher=dp,
