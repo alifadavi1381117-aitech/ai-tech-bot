@@ -380,7 +380,7 @@ def build_app():
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-        secret_token=WEBHOOK_SECRET,
+       
     ).register(app, path="/webhook")
 
     setup_application(app, dp, bot=bot)
