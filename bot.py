@@ -1,9 +1,10 @@
-# bot.py
 import os
 import json
 import html as _html
 import logging
-from typing import Iterable
+from io import BytesIO
+from zipfile import ZipFile, ZIP_DEFLATED
+from typing import Iterable, List, Dict, Any
 
 from aiohttp import web
 from aiogram import Dispatcher, F
@@ -26,27 +27,30 @@ def _require_env(name: str) -> str:
         raise RuntimeError(f"❌ {name} is missing (set it in Render env)")
     return v
 
-BOT_TOKEN     = _require_env("BOT_TOKEN")
-PUBLIC_URL    = _require_env("PUBLIC_URL")  # e.g. https://ai-tech-bot-or63.onrender.com
+BOT_TOKEN      = _require_env("BOT_TOKEN")
+PUBLIC_URL     = _require_env("PUBLIC_URL")  # e.g. https://your-app.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret123")
-PORT          = int(os.getenv("PORT", "10000"))
+PORT           = int(os.getenv("PORT", "10000"))
 
 # ---------------------------- Bot / Dispatcher ----------------------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 # ---------------------------- DB ----------------------------
-DB_PATH = "projects.json"
+DB_PATH = os.getenv("DB_PATH", "projects.json")
 if not os.path.exists(DB_PATH):
     raise RuntimeError("❌ فایل projects.json یافت نشد")
 
 with open(DB_PATH, "r", encoding="utf-8") as f:
-    db = json.load(f) or {}
-logger.info("Loaded projects.json with keys: %s", list(db.keys()))
+    db: Dict[str, Any] = json.load(f) or {}
+logger.info("Loaded %s with keys: %s", DB_PATH, list(db.keys()))
 
-robotics = db.get("robotics", [])
-iot      = db.get("iot", [])
-py_libs  = db.get("py_libs", [])
+robotics: List[Dict[str, Any]] = db.get("robotics", [])
+iot: List[Dict[str, Any]]      = db.get("iot", [])
+py_libs: List[Dict[str, Any]]  = db.get("py_libs", [])
+
+# ---------------------------- Simple in-memory state ----------------------------
+USER_STATE: Dict[int, str] = {}  # user_id -> 'search' when waiting for query
 
 # ---------------------------- Helpers ----------------------------
 TG_MAX = 4096
@@ -54,6 +58,13 @@ TG_MAX = 4096
 def chunk_text(s: str, n: int) -> Iterable[str]:
     for i in range(0, len(s), n):
         yield s[i:i+n]
+
+def safe_get_items_by_cat(category: str) -> List[Dict[str, Any]]:
+    if category == "robotics":
+        return robotics
+    if category == "iot":
+        return iot
+    return []
 
 async def safe_edit(message: Message, text: str, **kwargs):
     """Edit if possible; otherwise send a new message."""
@@ -68,17 +79,20 @@ def main_menu():
     kb.button(text="🤖 رباتیک", callback_data="cat_robotics")
     kb.button(text="🌐 اینترنت اشیا (IoT)", callback_data="cat_iot")
     kb.button(text="🐍 کتابخانه‌های پایتون", callback_data="cat_libs")
+    kb.button(text="🔎 جستجو", callback_data="search_start")
     kb.adjust(1)
     return kb.as_markup()
 
+
 def list_projects(category: str):
-    items = robotics if category == "robotics" else iot
+    items = safe_get_items_by_cat(category)
     kb = InlineKeyboardBuilder()
     for p in items:
         kb.button(text=p.get("title", "—"), callback_data=f"proj_{category}_{p.get('id','')}")
     kb.button(text="🔙 بازگشت", callback_data="back_main")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def list_libs():
     kb = InlineKeyboardBuilder()
@@ -89,17 +103,78 @@ def list_libs():
     kb.adjust(2)
     return kb.as_markup()
 
-def code_options(category: str, proj_id: str):
+
+def code_options(category: str, proj_id: str, proj: Dict[str, Any]):
     kb = InlineKeyboardBuilder()
+    # open code in chat
     for lang in ("c", "cpp", "micropython"):
-        kb.button(text=lang.upper(), callback_data=f"code_{category}_{proj_id}_{lang}")
+        kb.button(text=f"{lang.upper()}", callback_data=f"code_{category}_{proj_id}_{lang}")
+    # download single language (if exists)
+    available = list((proj.get("code") or {}).keys())
+    for lang in ("c", "cpp", "micropython"):
+        if lang in available:
+            kb.button(text=f"⬇️ {lang.upper()}", callback_data=f"dl_{category}_{proj_id}_{lang}")
+    # zip + json
+    kb.button(text="📦 ZIP همه کدها", callback_data=f"dl_{category}_{proj_id}_zip")
+    kb.button(text="🧾 JSON پروژه", callback_data=f"dl_{category}_{proj_id}_json")
+    # back
     kb.button(text="🔙 بازگشت", callback_data=f"back_projlist_{category}")
     kb.adjust(3)
     return kb.as_markup()
 
+
 def back_to_libs():
     kb = InlineKeyboardBuilder()
+    kb.button(text="⬇️ دانلود مثال", callback_data="dllib_example")  # handled contextually
+    kb.button(text="⬇️ JSON کتابخانه", callback_data="dllib_json")    # handled contextually
     kb.button(text="🔙 بازگشت", callback_data="cat_libs")
+    kb.adjust(2)
+    return kb.as_markup()
+
+# ---------------------------- Search ----------------------------
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+def search_all(query: str):
+    q = _norm(query)
+    if not q:
+        return []
+
+    results = []  # (kind, key, title)
+    # robotics / iot projects
+    for cat, items in (("robotics", robotics), ("iot", iot)):
+        for p in items:
+            hay = " ".join([
+                str(p.get("title", "")),
+                str(p.get("description", "")),
+                ",".join(p.get("boards", []) or []),
+                ",".join(p.get("parts", []) or []),
+            ]).lower()
+            if q in hay:
+                results.append(("proj", f"{cat}_{p.get('id','')}", p.get("title", "(بدون عنوان)")))
+    # python libs
+    for lib in py_libs:
+        hay = " ".join([
+            str(lib.get("name", "")),
+            str(lib.get("category", "")),
+            str(lib.get("description", "")),
+        ]).lower()
+        if q in hay:
+            results.append(("lib", lib.get("name", ""), lib.get("name", "(lib)")))
+
+    return results[:50]
+
+
+def search_results_kb(results):
+    kb = InlineKeyboardBuilder()
+    for kind, key, title in results:
+        if kind == "proj":
+            cat, pid = key.split("_", 1)
+            kb.button(text=f"📁 {title}", callback_data=f"proj_{cat}_{pid}")
+        elif kind == "lib":
+            kb.button(text=f"🐍 {title}", callback_data=f"lib_{key}")
+    kb.button(text="🔙 بازگشت", callback_data="back_main")
+    kb.adjust(1)
     return kb.as_markup()
 
 # ---------------------------- Handlers ----------------------------
@@ -108,8 +183,24 @@ async def start_cmd(msg: Message):
     await msg.answer("سلام 👋\nاز منو یکی از دسته‌بندی‌ها رو انتخاب کن:", reply_markup=main_menu())
 
 @dp.message(F.text)
-async def fallback(msg: Message):
+async def on_text(msg: Message):
+    # If user is in search mode, treat this as query
+    if USER_STATE.get(msg.from_user.id) == "search":
+        USER_STATE.pop(msg.from_user.id, None)
+        results = search_all(msg.text)
+        if not results:
+            await msg.answer("چیزی پیدا نشد. عبارت دقیق‌تری امتحان کن.", reply_markup=main_menu())
+            return
+        await msg.answer("نتایج جستجو:", reply_markup=search_results_kb(results))
+        return
+    # fallback
     await msg.answer("برای شروع از منوی زیر استفاده کن:", reply_markup=main_menu())
+
+@dp.callback_query(F.data == "search_start")
+async def search_start(cb: CallbackQuery):
+    USER_STATE[cb.from_user.id] = "search"
+    await safe_edit(cb.message, "🔎 عبارت جستجو رو بفرست (عنوان، توضیح، قطعه، برد و ...)")
+    await cb.answer()
 
 @dp.callback_query(F.data == "back_main")
 async def back_main(cb: CallbackQuery):
@@ -136,16 +227,16 @@ async def open_category(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("proj_"))
 async def project_detail(cb: CallbackQuery):
     _, cat, proj_id = cb.data.split("_", 2)
-    items = robotics if cat == "robotics" else iot
-    proj = next((p for p in items if p.get("id") == proj_id), None)
+    items = safe_get_items_by_cat(cat)
+    proj = next((p for p in items if str(p.get("id")) == proj_id), None)
     if not proj:
         await cb.answer("❌ پروژه پیدا نشد", show_alert=True)
         return
 
     title_h = _html.escape(proj.get("title", ""))
     desc_h  = _html.escape(proj.get("description", ""))
-    boards_h = _html.escape(", ".join(proj.get("boards", [])))
-    parts_h  = _html.escape(", ".join(proj.get("parts", [])))
+    boards_h = _html.escape(", ".join(proj.get("boards", []) or []))
+    parts_h  = _html.escape(", ".join(proj.get("parts", []) or []))
 
     text = f"""📌 <b>{title_h}</b>
 
@@ -154,19 +245,19 @@ async def project_detail(cb: CallbackQuery):
 ⚡️ بوردها: {boards_h or '—'}
 🧩 قطعات: {parts_h or '—'}"""
 
-    await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id))
+    await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id, proj))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("code_"))
 async def send_code(cb: CallbackQuery):
     _, cat, proj_id, lang = cb.data.split("_", 3)
-    items = robotics if cat == "robotics" else iot
-    proj  = next((p for p in items if p.get("id") == proj_id), None)
+    items = safe_get_items_by_cat(cat)
+    proj  = next((p for p in items if str(p.get("id")) == proj_id), None)
     if not proj:
         await cb.answer("❌ پروژه پیدا نشد", show_alert=True)
         return
 
-    code_raw = proj.get("code", {}).get(lang)
+    code_raw = (proj.get("code") or {}).get(lang)
     if not code_raw:
         await cb.answer("کدی برای این زبان موجود نیست", show_alert=True)
         return
@@ -174,23 +265,96 @@ async def send_code(cb: CallbackQuery):
     title_h = _html.escape(proj.get("title", ""))
     code_h  = _html.escape(code_raw)
 
-    # متن HTML (کوتاه) برای نمایش کد
     header = f"📌 <b>{title_h}</b> - {lang.upper()}\n\n"
     html_block = f"<pre><code>{code_h}</code></pre>"
     text = header + html_block
 
-    # اگر طولانی شد، به صورت فایل بفرست
     if len(text) <= 3500:
-        await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id))
+        await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id, proj))
     else:
         filename = f"{proj.get('title','project')}_{lang}.txt".replace(" ", "_")
         doc = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
         await cb.message.answer_document(
             document=doc,
             caption=f"📌 {proj.get('title','')} - {lang.upper()}",
-            reply_markup=code_options(cat, proj_id),
+            reply_markup=code_options(cat, proj_id, proj),
         )
     await cb.answer()
+
+# ---------------------------- Downloads ----------------------------
+
+def _lang_filename(title: str, lang: str) -> str:
+    base = (title or "project").replace(" ", "_")
+    ext = {"c": ".c", "cpp": ".cpp", "micropython": ".py"}.get(lang, ".txt")
+    return f"{base}{ext}"
+
+@dp.callback_query(F.data.startswith("dl_"))
+async def download(cb: CallbackQuery):
+    _, cat, proj_id, what = cb.data.split("_", 3)
+    items = safe_get_items_by_cat(cat)
+    proj  = next((p for p in items if str(p.get("id")) == proj_id), None)
+    if not proj:
+        await cb.answer("❌ پروژه پیدا نشد", show_alert=True)
+        return
+
+    title = proj.get("title", "project")
+    codes = proj.get("code") or {}
+
+    # single language download
+    if what in ("c", "cpp", "micropython"):
+        code_raw = codes.get(what)
+        if not code_raw:
+            await cb.answer("برای این زبان کدی موجود نیست", show_alert=True)
+            return
+        filename = _lang_filename(title, what)
+        file = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
+        await cb.message.answer_document(file, caption=f"⬇️ {title} — {what.upper()}")
+        await cb.answer()
+        return
+
+    # JSON dump
+    if what == "json":
+        data = json.dumps(proj, ensure_ascii=False, indent=2)
+        file = BufferedInputFile(data.encode("utf-8"), filename=f"{title.replace(' ','_')}.json")
+        await cb.message.answer_document(file, caption=f"🧾 JSON پروژه — {title}")
+        await cb.answer()
+        return
+
+    # ZIP all codes + README
+    if what == "zip":
+        buf = BytesIO()
+        with ZipFile(buf, mode="w", compression=ZIP_DEFLATED) as z:
+            # add available code files
+            for lang, content in codes.items():
+                z.writestr(_lang_filename(title, lang), content or "")
+            # add README
+            meta = {
+                "title": title,
+                "boards": proj.get("boards", []),
+                "parts": proj.get("parts", []),
+                "description": proj.get("description", ""),
+                "id": proj.get("id"),
+                "category": cat,
+            }
+            z.writestr("README.txt", (
+                f"Title: {title}\n"
+                f"Category: {cat}\n"
+                f"Description: {proj.get('description','')}\n"
+                f"Boards: {', '.join(proj.get('boards', []) or [])}\n"
+                f"Parts: {', '.join(proj.get('parts', []) or [])}\n"
+            ))
+            z.writestr("project.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        buf.seek(0)
+        filename = f"{title.replace(' ','_')}.zip"
+        file = BufferedInputFile(buf.read(), filename=filename)
+        await cb.message.answer_document(file, caption=f"📦 {title} — ZIP")
+        await cb.answer()
+        return
+
+    await cb.answer("درخواست نامعتبر", show_alert=True)
+
+# ---------------------------- Libraries: details + downloads ----------------------------
+CURRENT_LIB: Dict[int, str] = {}  # user_id -> lib_name (for contextual download buttons)
 
 @dp.callback_query(F.data.startswith("lib_"))
 async def lib_detail(cb: CallbackQuery):
@@ -199,6 +363,8 @@ async def lib_detail(cb: CallbackQuery):
     if not lib:
         await cb.answer("❌ کتابخانه پیدا نشد", show_alert=True)
         return
+
+    CURRENT_LIB[cb.from_user.id] = lib_name
 
     name_h    = _html.escape(lib.get("name", ""))
     cat_h     = _html.escape(lib.get("category", ""))
@@ -213,7 +379,36 @@ async def lib_detail(cb: CallbackQuery):
         f"📦 نصب:\n<code>{install_h}</code>\n\n"
         f"💡 مثال:\n<pre><code>{example_h}</code></pre>"
     )
-    await safe_edit(cb.message, text, reply_markup=back_to_libs())
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬇️ دانلود مثال", callback_data="dllib_example")
+    kb.button(text="⬇️ JSON کتابخانه", callback_data="dllib_json")
+    kb.button(text="🔙 بازگشت", callback_data="cat_libs")
+    kb.adjust(2)
+    await safe_edit(cb.message, text, reply_markup=kb.as_markup())
+    await cb.answer()
+
+@dp.callback_query(F.data == "dllib_example")
+async def dllib_example(cb: CallbackQuery):
+    name = CURRENT_LIB.get(cb.from_user.id)
+    lib = next((l for l in py_libs if l.get("name") == name), None)
+    if not lib:
+        await cb.answer("❌ پیدا نشد", show_alert=True)
+        return
+    example = lib.get("example") or ""
+    file = BufferedInputFile(example.encode("utf-8"), filename=f"{name}_example.py")
+    await cb.message.answer_document(file, caption=f"⬇️ مثال {name}")
+    await cb.answer()
+
+@dp.callback_query(F.data == "dllib_json")
+async def dllib_json(cb: CallbackQuery):
+    name = CURRENT_LIB.get(cb.from_user.id)
+    lib = next((l for l in py_libs if l.get("name") == name), None)
+    if not lib:
+        await cb.answer("❌ پیدا نشد", show_alert=True)
+        return
+    data = json.dumps(lib, ensure_ascii=False, indent=2)
+    file = BufferedInputFile(data.encode("utf-8"), filename=f"{name}.json")
+    await cb.message.answer_document(file, caption=f"🧾 JSON — {name}")
     await cb.answer()
 
 # ---------------------------- Webhook lifecycle ----------------------------
@@ -222,7 +417,6 @@ async def on_startup(app: web.Application):
     logger.info("✅ Webhook set: %s/webhook", PUBLIC_URL)
 
 async def on_shutdown(app: web.Application):
-    # حذف وبهوک اجباری نیست؛ ولی تمیز می‌کنیم
     await bot.delete_webhook()
     await bot.session.close()
     logger.info("🧹 Webhook deleted and session closed")
@@ -234,7 +428,7 @@ def build_app():
     async def root_get(_):
         return web.Response(text="Bot is running!")
 
-    app.router.add_get("/", root_get)  # فقط GET؛ HEAD به‌صورت خودکار هندل می‌شود
+    app.router.add_get("/", root_get)
 
     SimpleRequestHandler(
         dispatcher=dp,
