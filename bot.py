@@ -2,8 +2,6 @@ import os
 import json
 import html as _html
 import logging
-from io import BytesIO
-from zipfile import ZipFile, ZIP_DEFLATED
 from typing import Iterable, List, Dict, Any
 
 from aiohttp import web
@@ -250,7 +248,10 @@ async def project_detail(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("code_"))
 async def send_code(cb: CallbackQuery):
-    _, cat, proj_id, lang = cb.data.split("_", 3)
+    # robust parsing: allow proj_id to contain underscores
+    prefix, lang = cb.data.rsplit("_", 1)        # e.g. code_robotics_rb_line_follower_c -> prefix, 'c'
+    _, cat, proj_id = prefix.split("_", 2)       # -> cat='robotics', proj_id='rb_line_follower'
+
     items = safe_get_items_by_cat(cat)
     proj  = next((p for p in items if str(p.get("id")) == proj_id), None)
     if not proj:
@@ -290,7 +291,10 @@ def _lang_filename(title: str, lang: str) -> str:
 
 @dp.callback_query(F.data.startswith("dls_"))
 async def download_single(cb: CallbackQuery):
-    _, cat, proj_id, lang = cb.data.split("_", 3)
+    # robust parsing: allow proj_id to contain underscores
+    prefix, lang = cb.data.rsplit("_", 1)        # e.g. dls_robotics_rb_line_follower_c -> prefix, 'c'
+    _, cat, proj_id = prefix.split("_", 2)
+
     items = safe_get_items_by_cat(cat)
     proj  = next((p for p in items if str(p.get("id")) == proj_id), None)
     if not proj:
@@ -380,7 +384,7 @@ def build_app():
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-       
+        secret_token=WEBHOOK_SECRET,
     ).register(app, path="/webhook")
 
     setup_application(app, dp, bot=bot)
