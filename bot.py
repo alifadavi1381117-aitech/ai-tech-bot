@@ -51,6 +51,7 @@ py_libs: List[Dict[str, Any]]  = db.get("py_libs", [])
 
 # ---------------------------- Simple in-memory state ----------------------------
 USER_STATE: Dict[int, str] = {}  # user_id -> 'search' when waiting for query
+CURRENT_LIB: Dict[int, str] = {}  # user_id -> lib_name (for contextual download)
 
 # ---------------------------- Helpers ----------------------------
 TG_MAX = 4096
@@ -104,19 +105,18 @@ def list_libs():
     return kb.as_markup()
 
 
-def code_options(category: str, proj_id: str, proj: Dict[str, Any]):
+def code_menu(category: str, proj_id: str, proj: Dict[str, Any], current_lang: str | None = None):
+    """Language switcher; shows Download only for the currently open language."""
     kb = InlineKeyboardBuilder()
-    # open code in chat
+
+    # language switchers
     for lang in ("c", "cpp", "micropython"):
-        kb.button(text=f"{lang.upper()}", callback_data=f"code_{category}_{proj_id}_{lang}")
-    # download single language (if exists)
-    available = list((proj.get("code") or {}).keys())
-    for lang in ("c", "cpp", "micropython"):
-        if lang in available:
-            kb.button(text=f"⬇️ {lang.upper()}", callback_data=f"dl_{category}_{proj_id}_{lang}")
-    # zip + json
-    kb.button(text="📦 ZIP همه کدها", callback_data=f"dl_{category}_{proj_id}_zip")
-    kb.button(text="🧾 JSON پروژه", callback_data=f"dl_{category}_{proj_id}_json")
+        kb.button(text=lang.upper(), callback_data=f"code_{category}_{proj_id}_{lang}")
+
+    # contextual download only for current language
+    if current_lang and (proj.get("code") or {}).get(current_lang):
+        kb.button(text=f"⬇️ دانلود {current_lang.upper()}", callback_data=f"dls_{category}_{proj_id}_{current_lang}")
+
     # back
     kb.button(text="🔙 بازگشت", callback_data=f"back_projlist_{category}")
     kb.adjust(3)
@@ -125,8 +125,8 @@ def code_options(category: str, proj_id: str, proj: Dict[str, Any]):
 
 def back_to_libs():
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬇️ دانلود مثال", callback_data="dllib_example")  # handled contextually
-    kb.button(text="⬇️ JSON کتابخانه", callback_data="dllib_json")    # handled contextually
+    kb.button(text="⬇️ دانلود مثال", callback_data="dllib_example")
+    kb.button(text="⬇️ JSON کتابخانه", callback_data="dllib_json")
     kb.button(text="🔙 بازگشت", callback_data="cat_libs")
     kb.adjust(2)
     return kb.as_markup()
@@ -245,7 +245,7 @@ async def project_detail(cb: CallbackQuery):
 ⚡️ بوردها: {boards_h or '—'}
 🧩 قطعات: {parts_h or '—'}"""
 
-    await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id, proj))
+    await safe_edit(cb.message, text, reply_markup=code_menu(cat, proj_id, proj, current_lang=None))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("code_"))
@@ -270,92 +270,44 @@ async def send_code(cb: CallbackQuery):
     text = header + html_block
 
     if len(text) <= 3500:
-        await safe_edit(cb.message, text, reply_markup=code_options(cat, proj_id, proj))
+        await safe_edit(cb.message, text, reply_markup=code_menu(cat, proj_id, proj, current_lang=lang))
     else:
+        # اگر خیلی بلند بود، مستقیم فایل بده و پیام کوتاه بماند
         filename = f"{proj.get('title','project')}_{lang}.txt".replace(" ", "_")
         doc = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
         await cb.message.answer_document(
             document=doc,
             caption=f"📌 {proj.get('title','')} - {lang.upper()}",
-            reply_markup=code_options(cat, proj_id, proj),
+            reply_markup=code_menu(cat, proj_id, proj, current_lang=lang),
         )
     await cb.answer()
 
-# ---------------------------- Downloads ----------------------------
-
+# ---------------------------- Downloads (single lang ONLY when viewing) ----------------------------
 def _lang_filename(title: str, lang: str) -> str:
     base = (title or "project").replace(" ", "_")
     ext = {"c": ".c", "cpp": ".cpp", "micropython": ".py"}.get(lang, ".txt")
     return f"{base}{ext}"
 
-@dp.callback_query(F.data.startswith("dl_"))
-async def download(cb: CallbackQuery):
-    _, cat, proj_id, what = cb.data.split("_", 3)
+@dp.callback_query(F.data.startswith("dls_"))
+async def download_single(cb: CallbackQuery):
+    _, cat, proj_id, lang = cb.data.split("_", 3)
     items = safe_get_items_by_cat(cat)
     proj  = next((p for p in items if str(p.get("id")) == proj_id), None)
     if not proj:
         await cb.answer("❌ پروژه پیدا نشد", show_alert=True)
         return
 
-    title = proj.get("title", "project")
-    codes = proj.get("code") or {}
-
-    # single language download
-    if what in ("c", "cpp", "micropython"):
-        code_raw = codes.get(what)
-        if not code_raw:
-            await cb.answer("برای این زبان کدی موجود نیست", show_alert=True)
-            return
-        filename = _lang_filename(title, what)
-        file = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
-        await cb.message.answer_document(file, caption=f"⬇️ {title} — {what.upper()}")
-        await cb.answer()
+    code_raw = (proj.get("code") or {}).get(lang)
+    if not code_raw:
+        await cb.answer("برای این زبان کدی موجود نیست", show_alert=True)
         return
 
-    # JSON dump
-    if what == "json":
-        data = json.dumps(proj, ensure_ascii=False, indent=2)
-        file = BufferedInputFile(data.encode("utf-8"), filename=f"{title.replace(' ','_')}.json")
-        await cb.message.answer_document(file, caption=f"🧾 JSON پروژه — {title}")
-        await cb.answer()
-        return
-
-    # ZIP all codes + README
-    if what == "zip":
-        buf = BytesIO()
-        with ZipFile(buf, mode="w", compression=ZIP_DEFLATED) as z:
-            # add available code files
-            for lang, content in codes.items():
-                z.writestr(_lang_filename(title, lang), content or "")
-            # add README
-            meta = {
-                "title": title,
-                "boards": proj.get("boards", []),
-                "parts": proj.get("parts", []),
-                "description": proj.get("description", ""),
-                "id": proj.get("id"),
-                "category": cat,
-            }
-            z.writestr("README.txt", (
-                f"Title: {title}\n"
-                f"Category: {cat}\n"
-                f"Description: {proj.get('description','')}\n"
-                f"Boards: {', '.join(proj.get('boards', []) or [])}\n"
-                f"Parts: {', '.join(proj.get('parts', []) or [])}\n"
-            ))
-            z.writestr("project.json", json.dumps(meta, ensure_ascii=False, indent=2))
-        buf.seek(0)
-        filename = f"{title.replace(' ','_')}.zip"
-        file = BufferedInputFile(buf.read(), filename=filename)
-        await cb.message.answer_document(file, caption=f"📦 {title} — ZIP")
-        await cb.answer()
-        return
-
-    await cb.answer("درخواست نامعتبر", show_alert=True)
+    filename = _lang_filename(proj.get("title", "project"), lang)
+    file = BufferedInputFile(code_raw.encode("utf-8"), filename=filename)
+    await cb.message.answer_document(file, caption=f"⬇️ {proj.get('title','')} — {lang.upper()}")
+    await cb.answer()
 
 # ---------------------------- Libraries: details + downloads ----------------------------
-CURRENT_LIB: Dict[int, str] = {}  # user_id -> lib_name (for contextual download buttons)
-
 @dp.callback_query(F.data.startswith("lib_"))
 async def lib_detail(cb: CallbackQuery):
     lib_name = cb.data.split("_", 1)[1]
@@ -379,12 +331,7 @@ async def lib_detail(cb: CallbackQuery):
         f"📦 نصب:\n<code>{install_h}</code>\n\n"
         f"💡 مثال:\n<pre><code>{example_h}</code></pre>"
     )
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬇️ دانلود مثال", callback_data="dllib_example")
-    kb.button(text="⬇️ JSON کتابخانه", callback_data="dllib_json")
-    kb.button(text="🔙 بازگشت", callback_data="cat_libs")
-    kb.adjust(2)
-    await safe_edit(cb.message, text, reply_markup=kb.as_markup())
+    await safe_edit(cb.message, text, reply_markup=back_to_libs())
     await cb.answer()
 
 @dp.callback_query(F.data == "dllib_example")
